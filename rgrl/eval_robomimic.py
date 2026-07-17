@@ -14,7 +14,7 @@ runs:
         evals/<label>/
             config.json    the EvalConfig used
             summary.json   results
-            eval.log       captured stdout
+            eval.log       captured log output
             rollouts/      reserved for saved videos/trajectories (not yet written)
 """
 
@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import logging
 import os
 import sys
 import time
@@ -43,11 +44,13 @@ sys.modules.setdefault(
 import robomimic.utils.env_utils as EnvUtils
 import robomimic.utils.obs_utils as ObsUtils
 
-from rgrl.logutil import tee_stdout
+from rgrl.logutil import log_to_file
 from rgrl.policies.diffusion import DiffusionConfig, DiffusionPolicy
 from rgrl.policies.flow import FlowConfig, FlowPolicy
 from rgrl.profiler import SectionProfiler
 from rgrl.store import KIND_IMAGE, KIND_STATE, EpisodeStore
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -72,18 +75,20 @@ def load_policy(cfg: EvalConfig, device: torch.device) -> tuple[torch.nn.Module,
     ckpt = torch.load(cfg.ckpt, map_location="cpu", weights_only=False)
     tc = ckpt["config"]
     store = EpisodeStore(tc["store"])
-    pdict = dict(tc[tc["policy"]])
+    is_diffusion = tc["policy"] == "diffusion"
+    schema = DiffusionConfig if is_diffusion else FlowConfig
+    known = {f.name for f in dataclasses.fields(schema)}
+    pdict = {k: v for k, v in tc[tc["policy"]].items() if k in known}  # drop fields moved/removed since
     pdict["down_dims"] = tuple(pdict["down_dims"])
-    if pdict.get("crop_hw") is not None:
-        pdict["crop_hw"] = tuple(pdict["crop_hw"])
     if cfg.sampler is not None:
         pdict["sampler"] = cfg.sampler
     if cfg.inference_steps is not None:
         pdict["inference_steps"] = cfg.inference_steps
-    if tc["policy"] == "diffusion":
-        policy = DiffusionPolicy(DiffusionConfig(**pdict), store)
+    crop_hw = tuple(tc["crop_hw"]) if tc.get("crop_hw") is not None else None
+    if is_diffusion:
+        policy = DiffusionPolicy(DiffusionConfig(**pdict), store, crop_hw=crop_hw)
     else:
-        policy = FlowPolicy(FlowConfig(**pdict), store)
+        policy = FlowPolicy(FlowConfig(**pdict), store, crop_hw=crop_hw)
     policy.load_state_dict(ckpt["ema" if cfg.use_ema else "model"])
     policy = policy.to(device).eval()
     if cfg.compile:
@@ -133,7 +138,7 @@ def default_label(cfg: EvalConfig) -> str:
 def evaluate(cfg: EvalConfig) -> dict:
     eval_dir = (cfg.out or cfg.ckpt.parent) / "evals" / (cfg.label or default_label(cfg))
     eval_dir.mkdir(parents=True, exist_ok=True)
-    with tee_stdout(eval_dir / "eval.log"):
+    with log_to_file(eval_dir / "eval.log"):
         return _evaluate(cfg, eval_dir)
 
 
@@ -195,7 +200,7 @@ def _evaluate(cfg: EvalConfig, eval_dir: Path) -> dict:
                     hist[i].append(obs_frame(raw, image_keys, state_keys))
                     done[i] = bool(envs[i].is_success()["task"])
         successes += done
-        print(f"episodes {chunk + n:>3}/{cfg.episodes} success {sum(successes)}/{len(successes)}")
+        log.info(f"episodes {chunk + n:>3}/{cfg.episodes} success {sum(successes)}/{len(successes)}")
 
     for env in envs:
         env.env.close()  # tear down EGL contexts in order, not at interpreter exit
@@ -213,7 +218,7 @@ def _evaluate(cfg: EvalConfig, eval_dir: Path) -> dict:
     summary_path = eval_dir / "summary.json"
     summary_path.write_text(json.dumps(summary, indent=1))
     breakdown = prof.report_and_reset()
-    print(
+    log.info(
         f"success_rate {summary['success_rate']:.2f} ({cfg.episodes} eps) "
         f"wall {summary['wall_s']}s policy {summary['policy_ms_per_call']}ms/call "
         f"env {summary['env_ms_per_step']}ms/step -> {eval_dir}"

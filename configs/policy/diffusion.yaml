@@ -1,11 +1,10 @@
 # DDIM 100-train / 10-sample — repo default, not the original DP paper's schedule
-kind: diffusion
+_target_: rgrl.policies.diffusion.DiffusionConfig
 obs_horizon: 2
 horizon: 16
 n_action_steps: 8
 down_dims: [256, 512, 1024]
 num_kp: 32
-crop_hw: [76, 76]
 train_timesteps: 100
 inference_steps: 10
 sampler: ddim

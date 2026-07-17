@@ -1,10 +1,10 @@
 __pycache__/
 *.pyc
 .venv/
-runs/
-data/
-wandb/
-outputs/
+/runs/
+/data/
+/wandb/
+/outputs/
 *.log
 *.egg-info/
 .pytest_cache/

@@ -1,30 +1,33 @@
-"""Hydra config schema. Groups map 1:1 to configs/<group>/*.yaml:
+"""Config schema for the hydra config tree in configs/. Groups map 1:1 to
+configs/<group>/*.yaml, and every group's yaml files carry a `_target_`
+pointing at the dataclass (or, for `policy`, the policy config class itself)
+that `hydra.utils.instantiate()` builds directly — see train.py/eval.py.
 
-    data       which store to train on
-    policy     architecture + training-time schedule (diffusion | flow)
-    training   optimizer/steps/logging/perf knobs — policy-independent
-    inference  eval-time policy overrides (sampler, steps, compile) — policy-specific
-    env        rollout settings (horizon, parallel envs) — policy-independent
+    data       which store to train on              -> DataConfig
+    policy     architecture + training-time schedule -> DiffusionConfig | FlowConfig (rgrl/policies/*.py)
+    training   optimizer/steps/logging/perf knobs, policy-independent -> TrainingConfig
+    inference  eval-time policy overrides (sampler, steps, compile), policy-specific -> InferenceConfig
+    env        rollout settings (horizon, parallel envs), policy-independent -> EnvConfig
 
-`policy` is intentionally left untyped in the top-level schemas: diffusion and
-flow have different field sets, and its `kind` field selects which of
-DiffusionConfig/FlowConfig (rgrl/policies/*.py) to construct — see train.py.
-`env` deliberately does not repeat the task's physics (camera names, controller,
-robot): those live once in the store's env_meta (set at conversion time) and
-are read from the checkpoint, so there is nothing here that can drift from it.
+`env` deliberately does not repeat the task's physics (camera names,
+controller, robot): those live once in the store's env_meta (set at
+conversion time) and are read from the checkpoint, so there is nothing here
+that can drift from it.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-
-from hydra.core.config_store import ConfigStore
+from dataclasses import dataclass
 
 
 @dataclass
 class DataConfig:
     store: str = "data/stores/lift_ph_lowdim"
     val_episodes: int = 4
+    # crop margin off the store's native image resolution — a property of
+    # this dataset's images, not the policy architecture. Ignored for
+    # image-free (state-only) stores.
+    crop_hw: tuple | None = (76, 76)
 
 
 @dataclass
@@ -63,29 +66,3 @@ class EnvConfig:
     parallel_envs: int = 10
     episodes: int = 50
     seed: int = 10_000
-
-
-@dataclass
-class TrainCfg:
-    data: DataConfig = field(default_factory=DataConfig)
-    policy: dict = field(default_factory=lambda: {"kind": "diffusion"})
-    training: TrainingConfig = field(default_factory=TrainingConfig)
-    out: str = "runs/dev"
-
-
-@dataclass
-class EvalCfg:
-    ckpt: str = "???"
-    inference: InferenceConfig = field(default_factory=InferenceConfig)
-    env: EnvConfig = field(default_factory=EnvConfig)
-    out: str | None = None
-
-
-def register():
-    cs = ConfigStore.instance()
-    cs.store(group="data", name="base_data", node=DataConfig)
-    cs.store(group="training", name="base_training", node=TrainingConfig)
-    cs.store(group="inference", name="base_inference", node=InferenceConfig)
-    cs.store(group="env", name="base_env", node=EnvConfig)
-    cs.store(name="train_schema", node=TrainCfg)
-    cs.store(name="eval_schema", node=EvalCfg)

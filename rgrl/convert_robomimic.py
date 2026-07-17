@@ -11,6 +11,7 @@ are low-dim state. Pass --obs-keys to select a subset explicitly.
 from __future__ import annotations
 
 import json
+import logging
 import time
 from pathlib import Path
 
@@ -22,6 +23,8 @@ from robo_dataset.backends.zarr_backend import ZarrStoreWriter
 from robo_dataset.convert import convert
 
 from rgrl.store import write_sidecars
+
+log = logging.getLogger(__name__)
 
 
 def convert_dataset(
@@ -46,7 +49,7 @@ def convert_dataset(
 
     src = RobomimicHDF5Store(str(hdf5_path), obs_keys=obs_keys)
     image_keys = [k for k in obs_keys if src.frame_dtype(k) == np.uint8 and len(src.frame_shape(k)) == 3]
-    print(f"{src.n_episodes} episodes; image keys: {image_keys}")
+    log.info(f"{src.n_episodes} episodes; image keys: {image_keys}")
 
     # robomimic hdf5 stores lowdim obs/actions as float64; the model's buffers
     # are float32, so cast at write time rather than carry float64 through the
@@ -65,7 +68,7 @@ def convert_dataset(
     stats_keys = {k: src.get_sequence(k, 0, src.n_frames) for k in src.keys if k not in image_keys}
     env_meta["abs_action"] = abs_action
     write_sidecars(out, image_keys=image_keys, stats_keys=stats_keys, env_meta=env_meta, source=str(hdf5_path), fps=20.0)
-    print(f"wrote {out} in {time.time() - t0:.1f}s")
+    log.info(f"wrote {out} in {time.time() - t0:.1f}s")
 
 
 if __name__ == "__main__":

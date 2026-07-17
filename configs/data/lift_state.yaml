@@ -1,0 +1,4 @@
+_target_: rgrl.schema.DataConfig
+store: data/stores/lift_ph_lowdim
+val_episodes: 4
+crop_hw: null  # no images in this store

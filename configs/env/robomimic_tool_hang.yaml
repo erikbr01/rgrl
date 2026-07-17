@@ -1,3 +1,4 @@
+_target_: rgrl.schema.EnvConfig
 max_steps: 700
 parallel_envs: 10
 episodes: 50

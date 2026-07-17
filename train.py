@@ -1,47 +1,40 @@
-"""Hydra entrypoint. Composes configs/{data,policy,training}/*.yaml into the
-flat TrainConfig that rgrl.train_loop.train() expects (unchanged internally —
-only how it gets built changed). See rgrl/schema.py for the config groups.
+"""Hydra entrypoint. Every config group's yaml carries a `_target_`
+(rgrl/schema.py, rgrl/policies/*.py), so hydra.utils.instantiate() builds the
+real dataclass instances directly — no manual field-by-field dispatch. This
+composes into the flat TrainConfig that rgrl.train_loop.train() expects
+(unchanged internally).
 
     uv run python train.py policy=diffusion_umi data=tool_hang_state
     uv run python train.py policy=flow training.steps=10000
 """
 
-import hydra
-from omegaconf import DictConfig, OmegaConf
+import dataclasses
 
-import rgrl.schema as schema
-from rgrl.policies.diffusion import DiffusionConfig
+import hydra
+from hydra.utils import instantiate
+from omegaconf import DictConfig
+
+from rgrl.policies.diffusion import DiffusionConfig, DiffusionPolicy  # noqa: F401 (isinstance below)
 from rgrl.policies.flow import FlowConfig
 from rgrl.train_loop import TrainConfig, train
-
-schema.register()
-
-
-def _tupleize(fields: dict) -> dict:
-    if "down_dims" in fields:
-        fields["down_dims"] = tuple(fields["down_dims"])
-    if fields.get("crop_hw") is not None:
-        fields["crop_hw"] = tuple(fields["crop_hw"])
-    return fields
 
 
 @hydra.main(version_base=None, config_path="configs", config_name="train")
 def main(cfg: DictConfig) -> None:
-    policy_kind = cfg.policy.kind
-    fields = _tupleize(
-        {k: v for k, v in OmegaConf.to_container(cfg.policy, resolve=True).items() if k != "kind"}
-    )
-    diffusion = DiffusionConfig(**fields) if policy_kind == "diffusion" else DiffusionConfig()
-    flow = FlowConfig(**fields) if policy_kind == "flow" else FlowConfig()
+    data = instantiate(cfg.data, _convert_="partial")
+    policy_cfg = instantiate(cfg.policy, _convert_="partial")
+    training = instantiate(cfg.training)
+    is_diffusion = isinstance(policy_cfg, DiffusionConfig)
 
     tc = TrainConfig(
-        store=cfg.data.store,
+        store=data.store,
         out=cfg.out,
-        policy=policy_kind,
-        diffusion=diffusion,
-        flow=flow,
-        val_episodes=cfg.data.val_episodes,
-        **OmegaConf.to_container(cfg.training, resolve=True),
+        policy="diffusion" if is_diffusion else "flow",
+        diffusion=policy_cfg if is_diffusion else DiffusionConfig(),
+        flow=policy_cfg if not is_diffusion else FlowConfig(),
+        crop_hw=data.crop_hw,
+        val_episodes=data.val_episodes,
+        **dataclasses.asdict(training),
     )
     train(tc)
 

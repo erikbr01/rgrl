@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import logging
 import math
 import time
 from dataclasses import dataclass, field
@@ -16,11 +17,13 @@ import torch
 
 from rgrl.dataset import GpuSequenceDataset, Windows
 from rgrl.ema import EMA
-from rgrl.logutil import tee_stdout
+from rgrl.logutil import log_to_file
 from rgrl.policies.diffusion import SCHEDULE_PRESETS, DiffusionConfig, DiffusionPolicy
 from rgrl.policies.flow import FlowConfig, FlowPolicy
 from rgrl.profiler import SectionProfiler, chrome_trace
 from rgrl.store import EpisodeStore
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -31,6 +34,7 @@ class TrainConfig:
     preset: Literal["dp", "umi"] | None = None  # scheduling presets, see SCHEDULE_PRESETS
     diffusion: DiffusionConfig = field(default_factory=DiffusionConfig)
     flow: FlowConfig = field(default_factory=FlowConfig)
+    crop_hw: tuple[int, int] | None = (76, 76)  # data property, not policy architecture
 
     steps: int = 30_000
     batch_size: int = 256
@@ -56,14 +60,14 @@ class TrainConfig:
 
 def build_policy(cfg: TrainConfig, store: EpisodeStore) -> torch.nn.Module:
     if cfg.policy == "diffusion":
-        return DiffusionPolicy(cfg.diffusion, store)
-    return FlowPolicy(cfg.flow, store)
+        return DiffusionPolicy(cfg.diffusion, store, crop_hw=cfg.crop_hw)
+    return FlowPolicy(cfg.flow, store, crop_hw=cfg.crop_hw)
 
 
 def train(cfg: TrainConfig) -> Path:
     out = Path(cfg.out)
     out.mkdir(parents=True, exist_ok=True)
-    with tee_stdout(out / "train.log"):
+    with log_to_file(out / "train.log"):
         return _train(cfg, out)
 
 
@@ -88,7 +92,7 @@ def _train(cfg: TrainConfig, out: Path) -> Path:
 
     policy = build_policy(cfg, store).to(device)
     n_params = sum(p.numel() for p in policy.parameters())
-    print(
+    log.info(
         f"policy={cfg.policy} params={n_params / 1e6:.1f}M "
         f"samples={data.num_samples} data_on={data.data_device} "
         f"store={store.nbytes() / 1e9:.2f}GB"
@@ -159,7 +163,7 @@ def _train(cfg: TrainConfig, out: Path) -> Path:
                 one_step(step)
                 tracer.step()
         step += 1
-        print(f"chrome trace ({cfg.trace_steps} steps) -> {out / 'trace.json'}")
+        log.info(f"chrome trace ({cfg.trace_steps} steps) -> {out / 'trace.json'}")
 
     while step < cfg.steps:
         one_step(step)
@@ -173,7 +177,7 @@ def _train(cfg: TrainConfig, out: Path) -> Path:
             loss_sum.zero_()
             eta_min = (cfg.steps - step) / sps / 60
             breakdown = prof.report_and_reset()
-            print(
+            log.info(
                 f"step {step:>7}/{cfg.steps} loss {avg:.4f} "
                 f"lr {sched.get_last_lr()[0]:.2e} {sps:6.1f} it/s eta {eta_min:5.1f}m"
                 + (f"  [{breakdown}]" if breakdown else "")
@@ -190,7 +194,7 @@ def _train(cfg: TrainConfig, out: Path) -> Path:
                     for ids in torch.arange(val.num_samples).split(cfg.batch_size)
                 ]
             vloss = torch.stack(vlosses).mean().item()
-            print(f"step {step:>7} val_loss {vloss:.4f}")
+            log.info(f"step {step:>7} val_loss {vloss:.4f}")
             if run:
                 run.log({"val_loss": vloss}, step=step)
             policy.train()
@@ -201,7 +205,7 @@ def _train(cfg: TrainConfig, out: Path) -> Path:
             t_log = time.perf_counter()
 
     save(cfg.steps)
-    print(f"done -> {out / 'latest.pt'}")
+    log.info(f"done -> {out / 'latest.pt'}")
     if run:
         run.finish()
     return out / "latest.pt"

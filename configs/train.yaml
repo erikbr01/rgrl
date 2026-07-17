@@ -3,13 +3,16 @@ defaults:
   - policy: diffusion
   - training: default
   - override hydra/job_logging: none
+  - override hydra/hydra_logging: none
   - _self_
 
 # keep cwd at the invocation dir — everything (store paths, out) is relative
-# to it, and hydra's default chdir-per-run would silently break that. Job
-# logging (hydra's own <job_name>.log file handler) is disabled: it would
-# otherwise write to the cwd too, colliding with rgrl's own train.log/eval.log
-# inside the run's out dir (see rgrl/logutil.py).
+# to it, and hydra's default chdir-per-run would silently break that. Both of
+# hydra's own logging config groups are disabled: job_logging's file handler
+# would write to cwd, colliding with rgrl's own train.log/eval.log inside the
+# run's out dir, and hydra_logging attaches its own root console handler,
+# which would print every rgrl.* log record a second time via propagation
+# (rgrl/logutil.py already owns console output via the "rgrl" logger).
 hydra:
   job:
     chdir: false

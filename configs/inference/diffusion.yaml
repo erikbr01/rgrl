@@ -1,3 +1,4 @@
+_target_: rgrl.schema.InferenceConfig
 # no override: sample with whatever schedule the checkpoint was trained/configured with
 sampler: null
 inference_steps: null

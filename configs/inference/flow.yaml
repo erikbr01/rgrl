@@ -1,3 +1,4 @@
+_target_: rgrl.schema.InferenceConfig
 sampler: null
 inference_steps: null
 compile: false
