@@ -1,0 +1,43 @@
+[project]
+name = "rgrl"
+version = "0.1.0"
+description = "Really good robot learning: minimal, blazing-fast imitation learning."
+requires-python = ">=3.11"
+dependencies = [
+    "torch>=2.7",
+    "torchvision>=0.22",
+    "numpy>=1.26",
+    "h5py>=3.10",
+    "tyro>=0.9",
+    "tqdm>=4.66",
+]
+
+[project.optional-dependencies]
+wandb = ["wandb>=0.17"]
+eval = [
+    "robomimic>=0.3",
+    "robosuite==1.4.1",
+    "imageio[ffmpeg]>=2.34",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["rgrl"]
+
+[tool.uv]
+# robosuite 1.4.1 (needed for robomimic v0.3-era datasets) has old metadata.
+# Keep the core env resolvable without the eval extra.
+
+# cu126 wheels: newest CUDA that runs on this machine's 555 driver (CUDA 12.5;
+# 12.x wheels are minor-version compatible with driver >= 525).
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu126" }]
+torchvision = [{ index = "pytorch-cu126" }]
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
