@@ -44,6 +44,7 @@ class EvalConfig:
     max_steps: int = 400
     use_ema: bool = True
     bf16: bool = False
+    compile: bool = False  # CUDA-graph the UNet: ~2x lower latency, ~1min warmup
     seed: int = 10_000
     device: str = "cuda"
     out: Path | None = None  # default: ckpt dir
@@ -62,7 +63,10 @@ def load_policy(cfg: EvalConfig, device: torch.device) -> tuple[torch.nn.Module,
     else:
         policy = FlowPolicy(FlowConfig(**pdict), store)
     policy.load_state_dict(ckpt["ema" if cfg.use_ema else "model"])
-    return policy.to(device).eval(), store, ckpt["step"]
+    policy = policy.to(device).eval()
+    if cfg.compile:
+        policy.unet = torch.compile(policy.unet, mode="reduce-overhead", fullgraph=True)
+    return policy, store, ckpt["step"]
 
 
 def make_env(store: EpisodeStore, image_keys: list[str], state_keys: list[str]):
@@ -135,9 +139,12 @@ def evaluate(cfg: EvalConfig) -> dict:
             np.random.seed(cfg.seed + chunk + i)  # robosuite resets use the global numpy RNG
             hist.append(deque([obs_frame(envs[i].reset(), image_keys, state_keys)] * oh, maxlen=oh))
         for _ in range(0, cfg.max_steps, n_act):
-            idxs = [i for i in range(n) if not done[i]]
-            if not idxs:
+            if all(done):
                 break
+            # always batch all envs (done ones included): a static batch shape
+            # avoids torch.compile/CUDA-graph recaptures, and batch size is
+            # nearly free (inference is launch-overhead-bound)
+            idxs = list(range(n))
             with timed("policy"), autocast:
                 actions = policy.predict_action(batch_of(hist, idxs)).float().cpu().numpy()
             for t in range(n_act):
