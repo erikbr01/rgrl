@@ -56,16 +56,23 @@ class TrainConfig:
 
 
 def train(
-    cfg: TrainConfig, policy: nn.Module, store: EpisodeStore, policy_cfg: dict, store_cfg: dict
+    cfg: TrainConfig,
+    policy: nn.Module,
+    store: EpisodeStore,
+    policy_cfg: dict,
+    store_cfg: dict,
+    target_cfg: dict,
 ) -> Path:
-    """policy_cfg, store_cfg: the resolved hydra configs that built `policy`
-    and `store` (both already have a _target_ key) — saved into the
-    checkpoint as-is, so eval_robomimic.py can reconstruct them with a single
-    hydra.utils.instantiate() call each."""
+    """policy_cfg: the resolved hydra config that built `policy` (has a
+    _target_ key) — saved into the checkpoint as-is, so eval_robomimic.py can
+    reconstruct it with a single hydra.utils.instantiate() call. store_cfg,
+    target_cfg: the resolved data (source) and target shape_meta configs that
+    built `store` via rgrl.data.load_store() — saved so eval_robomimic.py can
+    call load_store() again and hit the same cache."""
     out = Path(cfg.out)
     out.mkdir(parents=True, exist_ok=True)
     with log_to_file(out / "train.log"):
-        return _train(cfg, policy, store, policy_cfg, store_cfg, out)
+        return _train(cfg, policy, store, policy_cfg, store_cfg, target_cfg, out)
 
 
 def _train(
@@ -74,6 +81,7 @@ def _train(
     store: EpisodeStore,
     policy_cfg: dict,
     store_cfg: dict,
+    target_cfg: dict,
     out: Path,
 ) -> Path:
     device = torch.device(cfg.device)
@@ -120,7 +128,12 @@ def _train(
         run = wandb.init(project=cfg.wandb_project, config=dataclasses.asdict(cfg))
 
     def full_config() -> dict:
-        return {**dataclasses.asdict(cfg), "store": store_cfg, "policy": policy_cfg}
+        return {
+            **dataclasses.asdict(cfg),
+            "store": store_cfg,
+            "target": target_cfg,
+            "policy": policy_cfg,
+        }
 
     (out / "config.json").write_text(json.dumps(full_config(), default=str, indent=1))
 

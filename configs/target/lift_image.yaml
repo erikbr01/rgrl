@@ -1,0 +1,25 @@
+# The target shape_meta DiffusionPolicy/FlowPolicy train against for this
+# task. Matches configs/data/lift_image.yaml's source shape_meta exactly
+# today (no conversion needed) -- see rgrl/conversion.py for what happens
+# when it doesn't.
+obs:
+  agentview_image:
+    shape: [84, 84, 3]
+    type: rgb
+    channel_order: rgb
+  robot0_eye_in_hand_image:
+    shape: [84, 84, 3]
+    type: rgb
+    channel_order: rgb
+  robot0_eef_pos:
+    shape: [3]
+    type: low_dim
+  robot0_eef_quat:
+    shape: [4]
+    type: low_dim
+    quat_convention: xyzw
+  robot0_gripper_qpos:
+    shape: [2]
+    type: low_dim
+action:
+  shape: [7]

@@ -1,0 +1,20 @@
+# The target shape_meta DiffusionPolicy/FlowPolicy train against for this
+# task. Matches configs/data/lift_state.yaml's source shape_meta exactly
+# today (no conversion needed) -- see rgrl/conversion.py for what happens
+# when it doesn't.
+obs:
+  object:
+    shape: [10]
+    type: low_dim
+  robot0_eef_pos:
+    shape: [3]
+    type: low_dim
+  robot0_eef_quat:
+    shape: [4]
+    type: low_dim
+    quat_convention: xyzw
+  robot0_gripper_qpos:
+    shape: [2]
+    type: low_dim
+action:
+  shape: [7]

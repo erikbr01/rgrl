@@ -1,19 +1,24 @@
-_target_: rgrl.store.EpisodeStore
-path: data/stores/lift_ph_image
+name: lift_ph_image
+path: /home/erbauer/diffusion_policy/data/robomimic/datasets/lift/ph/image.hdf5
+abs_action: false
+rename: {}
 shape_meta:
   obs:
     agentview_image:
       shape: [84, 84, 3]
       type: rgb
+      channel_order: rgb
     robot0_eye_in_hand_image:
       shape: [84, 84, 3]
       type: rgb
+      channel_order: rgb
     robot0_eef_pos:
       shape: [3]
       type: low_dim
     robot0_eef_quat:
       shape: [4]
       type: low_dim
+      quat_convention: xyzw
     robot0_gripper_qpos:
       shape: [2]
       type: low_dim

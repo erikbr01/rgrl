@@ -1,5 +1,6 @@
 defaults:
   - data: lift_state
+  - target: lift_state
   - policy: diffusion
   - training: default
   - override hydra/job_logging: none

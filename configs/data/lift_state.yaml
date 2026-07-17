@@ -1,5 +1,7 @@
-_target_: rgrl.store.EpisodeStore
-path: data/stores/lift_ph_lowdim
+name: lift_ph_lowdim
+path: /home/erbauer/diffusion_policy/data/robomimic/datasets/lift/ph/low_dim.hdf5
+abs_action: false
+rename: {}
 shape_meta:
   obs:
     object:
@@ -11,6 +13,7 @@ shape_meta:
     robot0_eef_quat:
       shape: [4]
       type: low_dim
+      quat_convention: xyzw
     robot0_gripper_qpos:
       shape: [2]
       type: low_dim
