@@ -15,8 +15,11 @@ dependencies = [
 [project.optional-dependencies]
 wandb = ["wandb>=0.17"]
 eval = [
-    "robomimic>=0.3",
+    "robomimic==0.3.0",
     "robosuite==1.4.1",
+    # robosuite 1.4.1's OSC controller breaks against mujoco >= 3 (mj_fullM
+    # signature change); 2.3.7 is the newest compatible release
+    "mujoco==2.3.7",
     "imageio[ffmpeg]>=2.34",
 ]
 
