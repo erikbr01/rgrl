@@ -21,7 +21,13 @@ def main(cfg: DictConfig) -> None:
     store = instantiate(cfg.data, _convert_="partial")
     policy = instantiate(cfg.policy, store=store, _convert_="partial")
     training = instantiate(cfg.training, out=cfg.out)
-    train(training, policy, store, OmegaConf.to_container(cfg.policy, resolve=True))
+    train(
+        training,
+        policy,
+        store,
+        OmegaConf.to_container(cfg.policy, resolve=True),
+        OmegaConf.to_container(cfg.data, resolve=True),
+    )
 
 
 if __name__ == "__main__":

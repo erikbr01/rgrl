@@ -82,7 +82,7 @@ def load_policy(
 ) -> tuple[torch.nn.Module, EpisodeStore, int]:
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     tc = ckpt["config"]
-    store = EpisodeStore(tc["store"])
+    store = instantiate(tc["store"])
     policy_cfg = dict(tc["policy"])  # the resolved config that built it at train time — _target_ and all
     if inference.sampler is not None:
         policy_cfg["sampler"] = inference.sampler

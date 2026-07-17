@@ -1,11 +1,15 @@
 """Convert a robomimic HDF5 dataset into an rgrl store. Runs once.
 
 Storage/conversion is robo_dataset's job (RobomimicHDF5Store -> ZarrStoreWriter
-via its streaming convert()); this script only adds rgrl's sidecars (kind
-classification, robomimic env_meta, normalization stats — see rgrl/store.py).
+via its streaming convert()); this script only adds rgrl's sidecars (robomimic
+env_meta, normalization stats — see rgrl/store.py).
 
-Obs keys are auto-detected: uint8 3-dim per-frame arrays are images, the rest
-are low-dim state. Pass --obs-keys to select a subset explicitly.
+Image keys are auto-detected here (uint8 3-dim per-frame arrays) only to
+decide storage dtype and which keys to skip when fitting normalization
+stats — it's a mechanical fact about the raw arrays, not the image/low_dim
+modeling classification. That classification is a data config concern: see
+shape_meta in configs/data/*.yaml and rgrl/store.py. Pass --obs-keys to
+select a subset of keys explicitly.
 """
 
 from __future__ import annotations
@@ -67,7 +71,7 @@ def convert_dataset(
 
     stats_keys = {k: src.get_sequence(k, 0, src.n_frames) for k in src.keys if k not in image_keys}
     env_meta["abs_action"] = abs_action
-    write_sidecars(out, image_keys=image_keys, stats_keys=stats_keys, env_meta=env_meta, source=str(hdf5_path), fps=20.0)
+    write_sidecars(out, stats_keys=stats_keys, env_meta=env_meta, source=str(hdf5_path), fps=20.0)
     log.info(f"wrote {out} in {time.time() - t0:.1f}s")
 
 

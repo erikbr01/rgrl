@@ -7,7 +7,14 @@ robo_dataset doesn't own: per-key kind classification (image/state/action,
 needed to route obs through the vision encoder vs. the state MinMax
 normalizer), the robomimic simulator env_meta (needed by the eval env
 runner), and per-key normalization stats (an rgrl/policy concern, not a
-storage concern) — three small sidecar files next to the robo_dataset store.
+storage concern) — small sidecar files next to the robo_dataset store.
+
+Kind classification is a modeling choice, not a fact about the stored bytes,
+so it isn't auto-detected at conversion time: the caller declares it via
+`shape_meta` (configs/data/*.yaml), the same way diffusion_policy's task
+configs declare shape_meta. EpisodeStore validates the declared shapes
+against what's actually on disk, so a stale config fails fast instead of
+silently mismatching the policy's encoder.
 """
 
 from __future__ import annotations
@@ -52,29 +59,31 @@ class StoreMeta:
         return len(self.episode_ends)
 
 
-def _kind_of(key: str, image_keys: set[str]) -> str:
-    if key == "action":
-        return KIND_ACTION
-    return KIND_IMAGE if key in image_keys else KIND_STATE
-
-
 class EpisodeStore:
-    """Read side: a robo_dataset store + rgrl's kind/env_meta/stats sidecars."""
+    """Read side: a robo_dataset store + rgrl's shape_meta/env_meta/stats.
 
-    def __init__(self, path: str | Path):
+    shape_meta declares every key this experiment expects, diffusion_policy
+    style:
+
+        obs:
+          agentview_image: {shape: [84, 84, 3], type: rgb}
+          robot0_eef_pos: {shape: [3], type: low_dim}
+        action:
+          shape: [7]
+
+    `type` is "rgb" or "low_dim" (default); anything else is rejected.
+    """
+
+    def __init__(self, path: str | Path, shape_meta: dict):
         self.path = Path(path)
         self._robo = open_store(str(self.path))
 
+        keys = {}
+        for k, spec in shape_meta["obs"].items():
+            keys[k] = self._checked_key_spec(k, spec["shape"], spec.get("type", "low_dim"))
+        keys["action"] = self._checked_key_spec("action", shape_meta["action"]["shape"], KIND_ACTION)
+
         rgrl_meta = json.loads((self.path / _RGRL_META_FILE).read_text())
-        image_keys = set(rgrl_meta["image_keys"])
-        keys = {
-            k: KeySpec(
-                shape=list(self._robo.frame_shape(k)),
-                dtype=str(self._robo.frame_dtype(k)),
-                kind=_kind_of(k, image_keys),
-            )
-            for k in self._robo.keys
-        }
         self.meta = StoreMeta(
             episode_ends=self._robo.episode_ends.tolist(),
             keys=keys,
@@ -84,6 +93,23 @@ class EpisodeStore:
         )
         stats_path = self.path / _STATS_FILE
         self.stats = json.loads(stats_path.read_text()) if stats_path.exists() else {}
+
+    def _checked_key_spec(self, key: str, declared_shape: list[int], type_: str) -> "KeySpec":
+        if type_ == KIND_ACTION:
+            kind = KIND_ACTION
+        elif type_ == "rgb":
+            kind = KIND_IMAGE
+        elif type_ == "low_dim":
+            kind = KIND_STATE
+        else:
+            raise ValueError(f"{key}: unknown shape_meta type {type_!r} (expected rgb | low_dim)")
+
+        actual_shape = list(self._robo.frame_shape(key))
+        if actual_shape != list(declared_shape):
+            raise ValueError(
+                f"{key}: shape_meta declares {list(declared_shape)}, store has {actual_shape}"
+            )
+        return KeySpec(shape=actual_shape, dtype=str(self._robo.frame_dtype(key)), kind=kind)
 
     def load(self, key: str) -> np.ndarray:
         return np.ascontiguousarray(self._robo.get_sequence(key, 0, self.meta.num_frames))
@@ -103,7 +129,6 @@ class EpisodeStore:
 
 def write_sidecars(
     store_path: str | Path,
-    image_keys: list[str],
     stats_keys: dict[str, np.ndarray],  # key -> (N, *shape) array, action/state only
     env_meta: dict | None = None,
     source: str = "",
@@ -115,12 +140,15 @@ def write_sidecars(
     Normalizers are fit once here (robo_dataset.normalization.fit_key) and
     persisted fitted (scale/offset), not recomputed at every policy
     construction — see rgrl/normalize.py for how they're read back.
+
+    Kind classification (image vs. low_dim) is not stored here — it's
+    declared by the caller's shape_meta config, not a fact about the store.
     """
     from robo_dataset.normalization import fit_key
 
     path = Path(store_path)
     (path / _RGRL_META_FILE).write_text(
-        json.dumps({"image_keys": image_keys, "env_meta": env_meta or {}, "source": source, "fps": fps}, indent=1)
+        json.dumps({"env_meta": env_meta or {}, "source": source, "fps": fps}, indent=1)
     )
     stats = {k: fit_key(v.reshape(len(v), -1), norm_method).to_dict() for k, v in stats_keys.items()}
     (path / _STATS_FILE).write_text(json.dumps(stats, indent=1))

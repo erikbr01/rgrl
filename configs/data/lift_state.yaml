@@ -1,2 +1,18 @@
 _target_: rgrl.store.EpisodeStore
 path: data/stores/lift_ph_lowdim
+shape_meta:
+  obs:
+    object:
+      shape: [10]
+      type: low_dim
+    robot0_eef_pos:
+      shape: [3]
+      type: low_dim
+    robot0_eef_quat:
+      shape: [4]
+      type: low_dim
+    robot0_gripper_qpos:
+      shape: [2]
+      type: low_dim
+  action:
+    shape: [7]

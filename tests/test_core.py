@@ -31,11 +31,14 @@ def tiny_store(tmp_path):
     w.finalize()
     write_sidecars(
         tmp_path / "store",
-        image_keys=[],
         stats_keys={k: np.concatenate([ep[k] for ep in episodes]) for k in key_shapes},
         source="test",
     )
-    return EpisodeStore(tmp_path / "store")
+    shape_meta = {
+        "obs": {"state": {"shape": [3], "type": "low_dim"}},
+        "action": {"shape": [2]},
+    }
+    return EpisodeStore(tmp_path / "store", shape_meta)
 
 
 def test_windowing_clamps_and_pads(tiny_store):
