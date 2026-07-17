@@ -14,10 +14,11 @@ from __future__ import annotations
 import math
 
 import torch
+from robo_dataset.normalization import KeyNormalizer
 from torch import nn
 
 from rgrl.nets.encoders import ResNet18Encoder, center_crop, random_crop
-from rgrl.normalize import MinMaxNormalizer
+from rgrl.normalize import Normalizer
 from rgrl.store import EpisodeStore
 
 
@@ -41,7 +42,7 @@ class ObsEncoder(nn.Module):
         state_dim = 0
         for k in self.state_keys:
             dim = math.prod(store.meta.keys[k].shape)
-            self.state_norms[k.replace(".", "_")] = MinMaxNormalizer(store.stats[k], dim)
+            self.state_norms[k.replace(".", "_")] = Normalizer(KeyNormalizer.from_dict(store.stats[k]))
             state_dim += dim
 
         self.encoders = nn.ModuleDict()

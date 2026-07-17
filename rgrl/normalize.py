@@ -1,30 +1,28 @@
-"""Normalization as policy-owned buffers: stats live in the checkpoint."""
+"""Normalization as policy-owned buffers: stats live in the checkpoint.
+
+Fitting (which method — minmax/zscore/max_abs/..., per-key stats) is
+robo_dataset's job (robo_dataset.normalization.fit_key, used at conversion
+time by rgrl/convert_robomimic.py). This module only wraps a fitted
+KeyNormalizer's (scale, offset) as nn.Module buffers, since KeyNormalizer is
+a plain dataclass and would otherwise not travel with a checkpoint's
+state_dict.
+"""
 
 from __future__ import annotations
 
 import torch
+from robo_dataset.normalization import KeyNormalizer
 from torch import nn
 
 
-class MinMaxNormalizer(nn.Module):
-    """Maps [min, max] -> [-1, 1] per dimension. Constant dims map to 0 and
-    invert back to their constant value."""
-
-    def __init__(self, stats: dict, dim: int):
+class Normalizer(nn.Module):
+    def __init__(self, kn: KeyNormalizer):
         super().__init__()
-        lo = torch.as_tensor(stats["min"], dtype=torch.float32).reshape(dim)
-        hi = torch.as_tensor(stats["max"], dtype=torch.float32).reshape(dim)
-        span = (hi - lo).clamp(min=1e-8)
-        constant = (hi - lo) < 1e-8
-        scale = torch.where(constant, torch.zeros_like(span), 2.0 / span)
-        offset = torch.where(constant, torch.zeros_like(lo), -1.0 - 2.0 * lo / span)
-        self.register_buffer("scale", scale)
-        self.register_buffer("offset", offset)
-        self.register_buffer("lo", lo)
+        self.register_buffer("scale", torch.as_tensor(kn.scale, dtype=torch.float32))
+        self.register_buffer("offset", torch.as_tensor(kn.offset, dtype=torch.float32))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return x * self.scale + self.offset
 
     def inverse(self, x: torch.Tensor) -> torch.Tensor:
-        safe = torch.where(self.scale == 0, torch.ones_like(self.scale), self.scale)
-        return torch.where(self.scale == 0, self.lo.expand_as(x), (x - self.offset) / safe)
+        return (x - self.offset) / self.scale

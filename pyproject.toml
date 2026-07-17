@@ -9,7 +9,9 @@ dependencies = [
     "numpy>=1.26",
     "h5py>=3.10",
     "tyro>=0.9",
+    "hydra-core>=1.3",
     "tqdm>=4.66",
+    "robo_dataset",
 ]
 
 [project.optional-dependencies]
@@ -39,6 +41,9 @@ packages = ["rgrl"]
 [tool.uv.sources]
 torch = [{ index = "pytorch-cu126" }]
 torchvision = [{ index = "pytorch-cu126" }]
+# vendored as a git submodule (third_party/robo_dataset), not copied in — stays
+# a standalone repo at github.com:erikbr01/robo_dataset
+robo_dataset = { path = "third_party/robo_dataset", editable = true }
 
 [[tool.uv.index]]
 name = "pytorch-cu126"

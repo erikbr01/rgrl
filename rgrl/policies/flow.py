@@ -7,10 +7,11 @@ from dataclasses import dataclass
 
 import torch
 import torch.nn.functional as F
+from robo_dataset.normalization import KeyNormalizer
 from torch import nn
 
 from rgrl.nets.unet1d import ConditionalUnet1D
-from rgrl.normalize import MinMaxNormalizer
+from rgrl.normalize import Normalizer
 from rgrl.policies.base import ObsEncoder
 from rgrl.store import EpisodeStore
 
@@ -34,7 +35,7 @@ class FlowPolicy(nn.Module):
         crop = cfg.crop_hw if any(s.kind == "image" for s in store.meta.keys.values()) else None
         self.enc = ObsEncoder(store, cfg.obs_horizon, crop, num_kp=cfg.num_kp)
         self.act_dim = store.meta.keys["action"].shape[0]
-        self.action_norm = MinMaxNormalizer(store.stats["action"], self.act_dim)
+        self.action_norm = Normalizer(KeyNormalizer.from_dict(store.stats["action"]))
         self.unet = ConditionalUnet1D(
             self.act_dim, global_cond_dim=self.enc.out_dim, down_dims=cfg.down_dims
         )

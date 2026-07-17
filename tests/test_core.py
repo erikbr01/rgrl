@@ -4,26 +4,37 @@ import numpy as np
 import pytest
 import torch
 
+from robo_dataset.backends.zarr_backend import ZarrStoreWriter
+from robo_dataset.normalization import fit_key
+
 from rgrl.dataset import GpuSequenceDataset, Windows
 from rgrl.nets.encoders import center_crop, random_crop
 from rgrl.nets.unet1d import ConditionalUnet1D
-from rgrl.normalize import MinMaxNormalizer
-from rgrl.store import EpisodeStore, StoreWriter
+from rgrl.normalize import Normalizer
+from rgrl.store import EpisodeStore, write_sidecars
 
 
 @pytest.fixture
 def tiny_store(tmp_path):
-    w = StoreWriter(tmp_path / "store")
     rng = np.random.default_rng(0)
+    key_shapes = {"state": (3,), "action": (2,)}
+    key_dtypes = {"state": np.float32, "action": np.float32}
+    w = ZarrStoreWriter.create(str(tmp_path / "store"), key_shapes=key_shapes, key_dtypes=key_dtypes)
+    episodes = []
     for length in (7, 5, 9):
-        w.add_episode(
-            {
-                "state": rng.normal(size=(length, 3)).astype(np.float32),
-                "action": rng.normal(size=(length, 2)).astype(np.float32),
-            },
-            kinds={"state": "state", "action": "action"},
-        )
-    w.finalize(source="test")
+        ep = {
+            "state": rng.normal(size=(length, 3)).astype(np.float32),
+            "action": rng.normal(size=(length, 2)).astype(np.float32),
+        }
+        w.put_episode(ep)
+        episodes.append(ep)
+    w.finalize()
+    write_sidecars(
+        tmp_path / "store",
+        image_keys=[],
+        stats_keys={k: np.concatenate([ep[k] for ep in episodes]) for k in key_shapes},
+        source="test",
+    )
     return EpisodeStore(tmp_path / "store")
 
 
@@ -61,9 +72,9 @@ def test_epoch_perm_reproducible(tiny_store):
     assert not torch.equal(ds.epoch_perm(1, 5), ds.epoch_perm(1, 6))
 
 
-def test_minmax_normalizer_roundtrip():
-    stats = {"min": [-2.0, 0.0, 5.0], "max": [2.0, 1.0, 5.0]}  # last dim constant
-    n = MinMaxNormalizer(stats, 3)
+def test_normalizer_roundtrip():
+    arr = np.array([[-2.0, 0.0, 5.0], [2.0, 1.0, 5.0]], dtype=np.float32)  # last dim constant
+    n = Normalizer(fit_key(arr, "minmax"))
     x = torch.tensor([[1.0, 0.25, 5.0], [-2.0, 1.0, 5.0]])
     y = n(x)
     assert y.min() >= -1 and y.max() <= 1
