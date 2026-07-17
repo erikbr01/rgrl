@@ -1,42 +1,27 @@
-"""Hydra entrypoint. Every config group's yaml carries a `_target_`
-(rgrl/schema.py, rgrl/policies/*.py), so hydra.utils.instantiate() builds the
-real dataclass instances directly — no manual field-by-field dispatch. This
-composes into the flat TrainConfig that rgrl.train_loop.train() expects
-(unchanged internally).
+"""Hydra entrypoint. Every config group's yaml carries a `_target_` pointing
+at the real class it builds — hydra.utils.instantiate() gives back an
+already-usable EpisodeStore / DiffusionPolicy|FlowPolicy / TrainConfig
+directly. `data` is instantiated first and injected into `policy` as an
+override kwarg (its `store` argument), since a store must exist before a
+policy that reads its shapes can be built.
 
     uv run python train.py policy=diffusion_umi data=tool_hang_state
     uv run python train.py policy=flow training.steps=10000
 """
 
-import dataclasses
-
 import hydra
 from hydra.utils import instantiate
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 
-from rgrl.policies.diffusion import DiffusionConfig, DiffusionPolicy  # noqa: F401 (isinstance below)
-from rgrl.policies.flow import FlowConfig
-from rgrl.train_loop import TrainConfig, train
+from rgrl.train_loop import train
 
 
 @hydra.main(version_base=None, config_path="configs", config_name="train")
 def main(cfg: DictConfig) -> None:
-    data = instantiate(cfg.data, _convert_="partial")
-    policy_cfg = instantiate(cfg.policy, _convert_="partial")
-    training = instantiate(cfg.training)
-    is_diffusion = isinstance(policy_cfg, DiffusionConfig)
-
-    tc = TrainConfig(
-        store=data.store,
-        out=cfg.out,
-        policy="diffusion" if is_diffusion else "flow",
-        diffusion=policy_cfg if is_diffusion else DiffusionConfig(),
-        flow=policy_cfg if not is_diffusion else FlowConfig(),
-        crop_hw=data.crop_hw,
-        val_episodes=data.val_episodes,
-        **dataclasses.asdict(training),
-    )
-    train(tc)
+    store = instantiate(cfg.data, _convert_="partial")
+    policy = instantiate(cfg.policy, store=store, _convert_="partial")
+    training = instantiate(cfg.training, out=cfg.out)
+    train(training, policy, store, OmegaConf.to_container(cfg.policy, resolve=True))
 
 
 if __name__ == "__main__":

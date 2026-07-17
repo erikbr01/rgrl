@@ -1,4 +1,4 @@
-_target_: rgrl.schema.TrainingConfig
+_target_: rgrl.train_loop.TrainConfig
 steps: 30000
 batch_size: 256
 lr: 1.0e-4
@@ -6,6 +6,7 @@ weight_decay: 1.0e-6
 betas: [0.95, 0.999]
 warmup_steps: 500
 seed: 0
+val_episodes: 4
 val_every: 2000
 log_every: 100
 save_every: 10000

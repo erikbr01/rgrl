@@ -1,4 +1,4 @@
-_target_: rgrl.schema.EnvConfig
+_target_: rgrl.eval_robomimic.RolloutConfig
 max_steps: 700
 parallel_envs: 10
 episodes: 50

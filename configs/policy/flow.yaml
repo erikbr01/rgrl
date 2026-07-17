@@ -1,8 +1,9 @@
-_target_: rgrl.policies.flow.FlowConfig
+_target_: rgrl.policies.flow.FlowPolicy
 obs_horizon: 2
 horizon: 16
 n_action_steps: 8
 down_dims: [256, 512, 1024]
 num_kp: 32
+image_hw: [76, 76]
 inference_steps: 10
 timestep_scale: 1000.0

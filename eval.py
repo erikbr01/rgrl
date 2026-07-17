@@ -1,7 +1,8 @@
 """Hydra entrypoint. The policy (architecture + weights) is loaded entirely
-from the checkpoint — only `inference` (policy-specific sampler/perf overrides)
-and `env` (policy-independent rollout settings) are composed here, each via
-hydra.utils.instantiate() against its `_target_` (rgrl/schema.py).
+from the checkpoint. `inference` (policy-specific sampler/perf overrides) and
+`env` (policy-independent rollout settings) each target their own real class
+directly (rgrl.eval_robomimic.InferenceConfig / RolloutConfig) — no merging,
+each instantiate() call maps straight to what evaluate() actually consumes.
 
     uv run python eval.py ckpt=runs/x/latest.pt inference=diffusion_dp env=robomimic_tool_hang
 """
@@ -12,28 +13,20 @@ import hydra
 from hydra.utils import instantiate
 from omegaconf import DictConfig
 
-from rgrl.eval_robomimic import EvalConfig, evaluate
+from rgrl.eval_robomimic import evaluate
 
 
 @hydra.main(version_base=None, config_path="configs", config_name="eval")
 def main(cfg: DictConfig) -> None:
     inference = instantiate(cfg.inference)
     env = instantiate(cfg.env)
-    ec = EvalConfig(
+    evaluate(
         ckpt=Path(cfg.ckpt),
-        episodes=env.episodes,
-        parallel_envs=env.parallel_envs,
-        max_steps=env.max_steps,
-        seed=env.seed,
-        use_ema=inference.use_ema,
-        bf16=inference.bf16,
-        compile=inference.compile,
-        sampler=inference.sampler,
-        inference_steps=inference.inference_steps,
+        inference=inference,
+        env=env,
         out=Path(cfg.out) if cfg.out else None,
         label=cfg.label,
     )
-    evaluate(ec)
 
 
 if __name__ == "__main__":

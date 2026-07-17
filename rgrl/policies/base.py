@@ -12,6 +12,10 @@ self-contained — no separate normalizer or augmentation artifacts. Transform
 mode (e.g. random-crop-while-training vs. deterministic) comes from
 nn.Module.training, same as nn.Dropout — policy.eval() alone switches
 everything to inference behavior, no explicit flag needed anywhere.
+
+The crop transform, if any, is derived automatically: the store already
+knows each image key's native shape, and the policy declares the spatial
+size it wants (image_hw) — a crop is inserted only if those actually differ.
 """
 
 from __future__ import annotations
@@ -35,20 +39,28 @@ class ObsEncoder(nn.Module):
         self,
         store: EpisodeStore,
         obs_horizon: int,
-        crop_hw: tuple[int, int] | None,
+        image_hw: tuple[int, int] | None,
         num_kp: int = 32,
     ):
         super().__init__()
         self.obs_horizon = obs_horizon
         self.image_keys = sorted(k for k, s in store.meta.keys.items() if s.kind == "image")
         self.state_keys = sorted(k for k, s in store.meta.keys.items() if s.kind == "state")
-        self.crop_hw = crop_hw
-        if crop_hw is not None:
+
+        native_hws = {tuple(store.meta.keys[k].shape[:2]) for k in self.image_keys}
+        assert len(native_hws) <= 1, f"image keys have mismatched native sizes: {native_hws}"
+        native_hw = next(iter(native_hws), None)
+        target_hw = image_hw if image_hw is not None else native_hw
+
+        self.crop = None
+        if native_hw is not None and target_hw != native_hw:
+            if target_hw[0] > native_hw[0] or target_hw[1] > native_hw[1]:
+                raise ValueError(f"policy wants images at {target_hw}, larger than native {native_hw}")
             # per_timestep=True, pad=0: independent crop offset per obs frame,
             # sampled anywhere in the native image (matches diffusion_policy's
             # CropRandomizer, the semantics this repo has always used).
-            self.pipeline = DataPipeline(
-                [CropTransform(self.image_keys, size=crop_hw, pad=0, per_timestep=True)]
+            self.crop = DataPipeline(
+                [CropTransform(self.image_keys, size=target_hw, pad=0, per_timestep=True)]
             )
 
         self.state_norms = nn.ModuleDict()
@@ -61,9 +73,7 @@ class ObsEncoder(nn.Module):
         self.encoders = nn.ModuleDict()
         feat_dim = 0
         for k in self.image_keys:
-            h, w, _ = store.meta.keys[k].shape
-            hw = crop_hw if crop_hw is not None else (h, w)
-            enc = ResNet18Encoder(hw, num_kp=num_kp)
+            enc = ResNet18Encoder(target_hw, num_kp=num_kp)
             self.encoders[k.replace(".", "_")] = enc
             feat_dim += enc.out_dim
 
@@ -80,8 +90,8 @@ class ObsEncoder(nn.Module):
                 k: batch[k].permute(0, 1, 4, 2, 3).float().div_(255.0)  # (B,T,H,W,C) -> (B,T,C,H,W)/255
                 for k in self.image_keys
             }
-            if self.crop_hw is not None:
-                imgs = self.pipeline(imgs)
+            if self.crop is not None:
+                imgs = self.crop(imgs)
             for k in self.image_keys:
                 x = imgs[k].reshape(b * self.obs_horizon, *imgs[k].shape[2:])
                 f = self.encoders[k.replace(".", "_")](x)

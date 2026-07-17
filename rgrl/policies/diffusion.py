@@ -20,23 +20,20 @@ from rgrl.store import EpisodeStore
 
 @dataclass
 class DiffusionConfig:
+    """The hyperparameters DiffusionPolicy was built with — kept internally
+    (self.cfg) for compute_loss/predict_action to read and so a checkpoint's
+    config can be reconstructed by re-splatting this back into the
+    constructor; not something calling code builds ahead of time."""
+
     obs_horizon: int = 2
     horizon: int = 16
     n_action_steps: int = 8
     down_dims: tuple[int, ...] = (256, 512, 1024)
     num_kp: int = 32
+    image_hw: tuple[int, int] | None = (76, 76)  # vision encoder's input size
     train_timesteps: int = 100
     inference_steps: int = 10
     sampler: str = "ddim"  # ddim (deterministic) | ddpm (stochastic ancestral)
-
-
-# scheduling presets; everything else (arch, horizons) stays at the defaults
-SCHEDULE_PRESETS: dict[str, dict] = {
-    # diffusion_policy (Chi et al.): DDPM ancestral over the full chain
-    "dp": {"sampler": "ddpm", "train_timesteps": 100, "inference_steps": 100},
-    # UMI: shorter trained chain, deterministic 16-step DDIM
-    "umi": {"sampler": "ddim", "train_timesteps": 50, "inference_steps": 16},
-}
 
 
 def cosine_betas(timesteps: int) -> torch.Tensor:
@@ -51,11 +48,11 @@ def cosine_betas(timesteps: int) -> torch.Tensor:
 
 
 class DiffusionPolicy(nn.Module):
-    def __init__(self, cfg: DiffusionConfig, store: EpisodeStore, crop_hw: tuple[int, int] | None = None):
+    def __init__(self, store: EpisodeStore, **kwargs):
         super().__init__()
-        self.cfg = cfg
-        crop = crop_hw if any(s.kind == "image" for s in store.meta.keys.values()) else None
-        self.enc = ObsEncoder(store, cfg.obs_horizon, crop, num_kp=cfg.num_kp)
+        self.cfg = DiffusionConfig(**kwargs)
+        cfg = self.cfg
+        self.enc = ObsEncoder(store, cfg.obs_horizon, cfg.image_hw, num_kp=cfg.num_kp)
         self.act_dim = store.meta.keys["action"].shape[0]
         self.action_norm = Normalizer(KeyNormalizer.from_dict(store.stats["action"]))
         self.unet = ConditionalUnet1D(

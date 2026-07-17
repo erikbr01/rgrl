@@ -1,4 +1,4 @@
-_target_: rgrl.schema.InferenceConfig
+_target_: rgrl.eval_robomimic.InferenceConfig
 # no override: sample with whatever schedule the checkpoint was trained/configured with
 sampler: null
 inference_steps: null

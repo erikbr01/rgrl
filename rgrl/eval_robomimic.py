@@ -12,7 +12,7 @@ runs:
     runs/<name>/
         config.json, latest.pt, train.log      (written by rgrl/train_loop.py)
         evals/<label>/
-            config.json    the EvalConfig used
+            config.json    the ckpt/inference/env args used
             summary.json   results
             eval.log       captured log output
             rollouts/      reserved for saved videos/trajectories (not yet written)
@@ -43,10 +43,9 @@ sys.modules.setdefault(
 )
 import robomimic.utils.env_utils as EnvUtils
 import robomimic.utils.obs_utils as ObsUtils
+from hydra.utils import instantiate
 
 from rgrl.logutil import log_to_file
-from rgrl.policies.diffusion import DiffusionConfig, DiffusionPolicy
-from rgrl.policies.flow import FlowConfig, FlowPolicy
 from rgrl.profiler import SectionProfiler
 from rgrl.store import KIND_IMAGE, KIND_STATE, EpisodeStore
 
@@ -54,44 +53,45 @@ log = logging.getLogger(__name__)
 
 
 @dataclass
-class EvalConfig:
-    ckpt: Path
-    episodes: int = 50
-    parallel_envs: int = 10
-    max_steps: int = 400
+class InferenceConfig:
+    """Policy-specific eval-time overrides — configs/inference/*.yaml targets
+    this directly; consumed as-is by evaluate(), never unpacked into
+    something else."""
+
     use_ema: bool = True
     bf16: bool = False
     compile: bool = False  # CUDA-graph the UNet: ~2x lower latency, ~1min warmup
-    # inference-time overrides (samplers are a free choice on a trained model)
-    sampler: str | None = None  # ddim | ddpm
+    sampler: str | None = None  # ddim | ddpm; samplers are a free choice on a trained model
     inference_steps: int | None = None
+
+
+@dataclass
+class RolloutConfig:
+    """Policy-independent rollout settings — configs/env/*.yaml targets this
+    directly; the same env config applies to any checkpoint trained on that
+    task."""
+
+    max_steps: int = 400
+    parallel_envs: int = 10
+    episodes: int = 50
     seed: int = 10_000
-    device: str = "cuda"
-    out: Path | None = None  # default: ckpt's experiment dir
-    label: str | None = None  # evals/<label>/ ; default: derived from overrides
 
 
-def load_policy(cfg: EvalConfig, device: torch.device) -> tuple[torch.nn.Module, EpisodeStore, int]:
-    ckpt = torch.load(cfg.ckpt, map_location="cpu", weights_only=False)
+def load_policy(
+    ckpt_path: Path, inference: InferenceConfig, device: torch.device
+) -> tuple[torch.nn.Module, EpisodeStore, int]:
+    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     tc = ckpt["config"]
     store = EpisodeStore(tc["store"])
-    is_diffusion = tc["policy"] == "diffusion"
-    schema = DiffusionConfig if is_diffusion else FlowConfig
-    known = {f.name for f in dataclasses.fields(schema)}
-    pdict = {k: v for k, v in tc[tc["policy"]].items() if k in known}  # drop fields moved/removed since
-    pdict["down_dims"] = tuple(pdict["down_dims"])
-    if cfg.sampler is not None:
-        pdict["sampler"] = cfg.sampler
-    if cfg.inference_steps is not None:
-        pdict["inference_steps"] = cfg.inference_steps
-    crop_hw = tuple(tc["crop_hw"]) if tc.get("crop_hw") is not None else None
-    if is_diffusion:
-        policy = DiffusionPolicy(DiffusionConfig(**pdict), store, crop_hw=crop_hw)
-    else:
-        policy = FlowPolicy(FlowConfig(**pdict), store, crop_hw=crop_hw)
-    policy.load_state_dict(ckpt["ema" if cfg.use_ema else "model"])
+    policy_cfg = dict(tc["policy"])  # the resolved config that built it at train time — _target_ and all
+    if inference.sampler is not None:
+        policy_cfg["sampler"] = inference.sampler
+    if inference.inference_steps is not None:
+        policy_cfg["inference_steps"] = inference.inference_steps
+    policy = instantiate(policy_cfg, store=store)
+    policy.load_state_dict(ckpt["ema" if inference.use_ema else "model"])
     policy = policy.to(device).eval()
-    if cfg.compile:
+    if inference.compile:
         policy.unet = torch.compile(policy.unet, mode="reduce-overhead", fullgraph=True)
     return policy, store, ckpt["step"]
 
@@ -126,35 +126,49 @@ def obs_frame(raw: dict, image_keys: list[str], state_keys: list[str]) -> dict[s
     return frame
 
 
-def default_label(cfg: EvalConfig) -> str:
-    parts = [cfg.sampler or "sched", str(cfg.inference_steps or "default")]
-    if not cfg.use_ema:
+def default_label(inference: InferenceConfig) -> str:
+    parts = [inference.sampler or "sched", str(inference.inference_steps or "default")]
+    if not inference.use_ema:
         parts.append("noema")
-    if cfg.compile:
+    if inference.compile:
         parts.append("compiled")
     return "_".join(parts)
 
 
-def evaluate(cfg: EvalConfig) -> dict:
-    eval_dir = (cfg.out or cfg.ckpt.parent) / "evals" / (cfg.label or default_label(cfg))
+def evaluate(
+    ckpt: Path,
+    inference: InferenceConfig,
+    env: RolloutConfig,
+    out: Path | None = None,  # default: ckpt's experiment dir
+    label: str | None = None,  # evals/<label>/ ; default: derived from inference overrides
+    device: str = "cuda",
+) -> dict:
+    eval_dir = (out or ckpt.parent) / "evals" / (label or default_label(inference))
     eval_dir.mkdir(parents=True, exist_ok=True)
     with log_to_file(eval_dir / "eval.log"):
-        return _evaluate(cfg, eval_dir)
+        return _evaluate(ckpt, inference, env, torch.device(device), eval_dir)
 
 
-def _evaluate(cfg: EvalConfig, eval_dir: Path) -> dict:
-    (eval_dir / "config.json").write_text(json.dumps(dataclasses.asdict(cfg), default=str, indent=1))
-    device = torch.device(cfg.device)
-    torch.manual_seed(cfg.seed)
-    policy, store, step = load_policy(cfg, device)
+def _evaluate(
+    ckpt: Path, inference: InferenceConfig, env_cfg: RolloutConfig, device: torch.device, eval_dir: Path
+) -> dict:
+    (eval_dir / "config.json").write_text(
+        json.dumps(
+            {"ckpt": str(ckpt), "inference": dataclasses.asdict(inference), "env": dataclasses.asdict(env_cfg)},
+            default=str,
+            indent=1,
+        )
+    )
+    torch.manual_seed(env_cfg.seed)
+    policy, store, step = load_policy(ckpt, inference, device)
     image_keys = sorted(k for k, s in store.meta.keys.items() if s.kind == KIND_IMAGE)
     state_keys = sorted(k for k, s in store.meta.keys.items() if s.kind == KIND_STATE)
     oh, n_act = policy.cfg.obs_horizon, policy.cfg.n_action_steps
 
-    n_envs = min(cfg.parallel_envs, cfg.episodes)
+    n_envs = min(env_cfg.parallel_envs, env_cfg.episodes)
     envs = [make_env(store, image_keys, state_keys) for _ in range(n_envs)]
 
-    autocast = torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=cfg.bf16)
+    autocast = torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=inference.bf16)
     prof = SectionProfiler(device)
     wall = {"policy": [0.0, 0], "env": [0.0, 0]}
 
@@ -176,13 +190,13 @@ def _evaluate(cfg: EvalConfig, eval_dir: Path) -> dict:
 
     successes: list[bool] = []
     t_start = time.perf_counter()
-    for chunk in range(0, cfg.episodes, n_envs):
-        n = min(n_envs, cfg.episodes - chunk)
+    for chunk in range(0, env_cfg.episodes, n_envs):
+        n = min(n_envs, env_cfg.episodes - chunk)
         hist, done = [], [False] * n
         for i in range(n):
-            np.random.seed(cfg.seed + chunk + i)  # robosuite resets use the global numpy RNG
+            np.random.seed(env_cfg.seed + chunk + i)  # robosuite resets use the global numpy RNG
             hist.append(deque([obs_frame(envs[i].reset(), image_keys, state_keys)] * oh, maxlen=oh))
-        for _ in range(0, cfg.max_steps, n_act):
+        for _ in range(0, env_cfg.max_steps, n_act):
             if all(done):
                 break
             # always batch all envs (done ones included): a static batch shape
@@ -200,16 +214,16 @@ def _evaluate(cfg: EvalConfig, eval_dir: Path) -> dict:
                     hist[i].append(obs_frame(raw, image_keys, state_keys))
                     done[i] = bool(envs[i].is_success()["task"])
         successes += done
-        log.info(f"episodes {chunk + n:>3}/{cfg.episodes} success {sum(successes)}/{len(successes)}")
+        log.info(f"episodes {chunk + n:>3}/{env_cfg.episodes} success {sum(successes)}/{len(successes)}")
 
-    for env in envs:
-        env.env.close()  # tear down EGL contexts in order, not at interpreter exit
+    for e in envs:
+        e.env.close()  # tear down EGL contexts in order, not at interpreter exit
     if device.type == "cuda":
         torch.cuda.synchronize()
     summary = {
         "success_rate": sum(successes) / len(successes),
-        "episodes": cfg.episodes,
-        "ckpt": str(cfg.ckpt),
+        "episodes": env_cfg.episodes,
+        "ckpt": str(ckpt),
         "step": step,
         "wall_s": round(time.perf_counter() - t_start, 1),
         "policy_ms_per_call": round(1e3 * wall["policy"][0] / max(1, wall["policy"][1]), 2),
@@ -219,7 +233,7 @@ def _evaluate(cfg: EvalConfig, eval_dir: Path) -> dict:
     summary_path.write_text(json.dumps(summary, indent=1))
     breakdown = prof.report_and_reset()
     log.info(
-        f"success_rate {summary['success_rate']:.2f} ({cfg.episodes} eps) "
+        f"success_rate {summary['success_rate']:.2f} ({env_cfg.episodes} eps) "
         f"wall {summary['wall_s']}s policy {summary['policy_ms_per_call']}ms/call "
         f"env {summary['env_ms_per_step']}ms/step -> {eval_dir}"
         + (f"  [{breakdown}]" if breakdown else "")

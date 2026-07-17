@@ -18,21 +18,26 @@ from rgrl.store import EpisodeStore
 
 @dataclass
 class FlowConfig:
+    """The hyperparameters FlowPolicy was built with — see DiffusionConfig's
+    docstring for why this is kept internally rather than constructed ahead
+    of time by calling code."""
+
     obs_horizon: int = 2
     horizon: int = 16
     n_action_steps: int = 8
     down_dims: tuple[int, ...] = (256, 512, 1024)
     num_kp: int = 32
+    image_hw: tuple[int, int] | None = (76, 76)  # vision encoder's input size
     inference_steps: int = 10
     timestep_scale: float = 1000.0  # sinusoidal embedding resolution for t in [0,1]
 
 
 class FlowPolicy(nn.Module):
-    def __init__(self, cfg: FlowConfig, store: EpisodeStore, crop_hw: tuple[int, int] | None = None):
+    def __init__(self, store: EpisodeStore, **kwargs):
         super().__init__()
-        self.cfg = cfg
-        crop = crop_hw if any(s.kind == "image" for s in store.meta.keys.values()) else None
-        self.enc = ObsEncoder(store, cfg.obs_horizon, crop, num_kp=cfg.num_kp)
+        self.cfg = FlowConfig(**kwargs)
+        cfg = self.cfg
+        self.enc = ObsEncoder(store, cfg.obs_horizon, cfg.image_hw, num_kp=cfg.num_kp)
         self.act_dim = store.meta.keys["action"].shape[0]
         self.action_norm = Normalizer(KeyNormalizer.from_dict(store.stats["action"]))
         self.unet = ConditionalUnet1D(

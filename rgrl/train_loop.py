@@ -1,5 +1,10 @@
 """The training loop. Flat, single file, fast by default:
 GPU-resident data, bf16 autocast, torch.compile, fused AdamW, fused EMA.
+
+train() takes an already-constructed policy and store (built by train.py via
+hydra.utils.instantiate against the real classes — see rgrl/policies/*.py,
+rgrl/store.py) rather than building them itself from a config bundle; this
+file only owns the scalar training-recipe knobs.
 """
 
 from __future__ import annotations
@@ -9,17 +14,15 @@ import json
 import logging
 import math
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
 
 import torch
+from torch import nn
 
 from rgrl.dataset import GpuSequenceDataset, Windows
 from rgrl.ema import EMA
 from rgrl.logutil import log_to_file
-from rgrl.policies.diffusion import SCHEDULE_PRESETS, DiffusionConfig, DiffusionPolicy
-from rgrl.policies.flow import FlowConfig, FlowPolicy
 from rgrl.profiler import SectionProfiler, chrome_trace
 from rgrl.store import EpisodeStore
 
@@ -28,13 +31,7 @@ log = logging.getLogger(__name__)
 
 @dataclass
 class TrainConfig:
-    store: Path
     out: Path = Path("runs/dev")
-    policy: Literal["diffusion", "flow"] = "diffusion"
-    preset: Literal["dp", "umi"] | None = None  # scheduling presets, see SCHEDULE_PRESETS
-    diffusion: DiffusionConfig = field(default_factory=DiffusionConfig)
-    flow: FlowConfig = field(default_factory=FlowConfig)
-    crop_hw: tuple[int, int] | None = (76, 76)  # data property, not policy architecture
 
     steps: int = 30_000
     batch_size: int = 256
@@ -58,31 +55,23 @@ class TrainConfig:
     trace_steps: int = 0  # >0: write a chrome trace of N steps, then continue
 
 
-def build_policy(cfg: TrainConfig, store: EpisodeStore) -> torch.nn.Module:
-    if cfg.policy == "diffusion":
-        return DiffusionPolicy(cfg.diffusion, store, crop_hw=cfg.crop_hw)
-    return FlowPolicy(cfg.flow, store, crop_hw=cfg.crop_hw)
-
-
-def train(cfg: TrainConfig) -> Path:
+def train(cfg: TrainConfig, policy: nn.Module, store: EpisodeStore, policy_cfg: dict) -> Path:
+    """policy_cfg: the resolved hydra config that built `policy` (already has
+    a _target_ key) — saved into the checkpoint as-is, so eval_robomimic.py
+    can reconstruct it with a single hydra.utils.instantiate() call."""
     out = Path(cfg.out)
     out.mkdir(parents=True, exist_ok=True)
     with log_to_file(out / "train.log"):
-        return _train(cfg, out)
+        return _train(cfg, policy, store, policy_cfg, out)
 
 
-def _train(cfg: TrainConfig, out: Path) -> Path:
-    if cfg.preset is not None:
-        assert cfg.policy == "diffusion", "presets configure the diffusion schedule"
-        cfg.diffusion = dataclasses.replace(cfg.diffusion, **SCHEDULE_PRESETS[cfg.preset])
+def _train(cfg: TrainConfig, policy: nn.Module, store: EpisodeStore, policy_cfg: dict, out: Path) -> Path:
     device = torch.device(cfg.device)
     torch.manual_seed(cfg.seed)
     torch.set_float32_matmul_precision("high")  # tf32
     torch.backends.cudnn.benchmark = True
 
-    store = EpisodeStore(cfg.store)
-    pcfg = cfg.diffusion if cfg.policy == "diffusion" else cfg.flow
-    windows = Windows(obs_horizon=pcfg.obs_horizon, horizon=pcfg.horizon)
+    windows = Windows(obs_horizon=policy.cfg.obs_horizon, horizon=policy.cfg.horizon)
     data = GpuSequenceDataset(store, windows, device, cfg.val_episodes, "train")
     val = (
         GpuSequenceDataset(store, windows, device, cfg.val_episodes, "val")
@@ -90,10 +79,10 @@ def _train(cfg: TrainConfig, out: Path) -> Path:
         else None
     )
 
-    policy = build_policy(cfg, store).to(device)
+    policy = policy.to(device)
     n_params = sum(p.numel() for p in policy.parameters())
     log.info(
-        f"policy={cfg.policy} params={n_params / 1e6:.1f}M "
+        f"policy={type(policy).__name__} params={n_params / 1e6:.1f}M "
         f"samples={data.num_samples} data_on={data.data_device} "
         f"store={store.nbytes() / 1e9:.2f}GB"
     )
@@ -120,14 +109,17 @@ def _train(cfg: TrainConfig, out: Path) -> Path:
 
         run = wandb.init(project=cfg.wandb_project, config=dataclasses.asdict(cfg))
 
-    (out / "config.json").write_text(json.dumps(dataclasses.asdict(cfg), default=str, indent=1))
+    def full_config() -> dict:
+        return {**dataclasses.asdict(cfg), "store": str(store.path), "policy": policy_cfg}
+
+    (out / "config.json").write_text(json.dumps(full_config(), default=str, indent=1))
 
     def save(step: int):
         torch.save(
             {
                 "model": policy.state_dict(),
                 "ema": ema.state_dict(),
-                "config": dataclasses.asdict(cfg),
+                "config": full_config(),
                 "step": step,
             },
             out / "latest.pt",

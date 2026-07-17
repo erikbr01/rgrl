@@ -1,4 +1,2 @@
-_target_: rgrl.schema.DataConfig
-store: data/stores/lift_ph_image
-val_episodes: 4
-crop_hw: [76, 76]  # native images are 84x84
+_target_: rgrl.store.EpisodeStore
+path: data/stores/lift_ph_image
