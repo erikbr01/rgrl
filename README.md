@@ -51,6 +51,13 @@ uv run python train.py --store data/stores/lift_ph_image --out runs/lift_image \
 # flow matching instead of diffusion
 uv run python train.py --store ... --policy flow
 
+# scheduling presets: dp = DDPM 100 train/100 sample (Chi et al.),
+# umi = DDIM 50 train/16 sample. Default is DDIM 100/10.
+uv run python train.py --store ... --preset umi
+
+# samplers are an inference-time choice — sweep them on a trained checkpoint:
+uv run python eval.py runs/x/latest.pt --sampler ddpm --inference-steps 100
+
 # evaluate a checkpoint in the robomimic env (needs: uv sync --extra eval)
 uv run python eval.py --ckpt runs/lift_image/latest.pt --episodes 50
 ```

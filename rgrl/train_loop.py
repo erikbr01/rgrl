@@ -16,7 +16,7 @@ import torch
 
 from rgrl.dataset import GpuSequenceDataset, Windows
 from rgrl.ema import EMA
-from rgrl.policies.diffusion import DiffusionConfig, DiffusionPolicy
+from rgrl.policies.diffusion import SCHEDULE_PRESETS, DiffusionConfig, DiffusionPolicy
 from rgrl.policies.flow import FlowConfig, FlowPolicy
 from rgrl.profiler import SectionProfiler, chrome_trace
 from rgrl.store import EpisodeStore
@@ -27,6 +27,7 @@ class TrainConfig:
     store: Path
     out: Path = Path("runs/dev")
     policy: Literal["diffusion", "flow"] = "diffusion"
+    preset: Literal["dp", "umi"] | None = None  # scheduling presets, see SCHEDULE_PRESETS
     diffusion: DiffusionConfig = field(default_factory=DiffusionConfig)
     flow: FlowConfig = field(default_factory=FlowConfig)
 
@@ -59,6 +60,9 @@ def build_policy(cfg: TrainConfig, store: EpisodeStore) -> torch.nn.Module:
 
 
 def train(cfg: TrainConfig) -> Path:
+    if cfg.preset is not None:
+        assert cfg.policy == "diffusion", "presets configure the diffusion schedule"
+        cfg.diffusion = dataclasses.replace(cfg.diffusion, **SCHEDULE_PRESETS[cfg.preset])
     device = torch.device(cfg.device)
     torch.manual_seed(cfg.seed)
     torch.set_float32_matmul_precision("high")  # tf32

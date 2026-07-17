@@ -45,6 +45,9 @@ class EvalConfig:
     use_ema: bool = True
     bf16: bool = False
     compile: bool = False  # CUDA-graph the UNet: ~2x lower latency, ~1min warmup
+    # inference-time overrides (samplers are a free choice on a trained model)
+    sampler: str | None = None  # ddim | ddpm
+    inference_steps: int | None = None
     seed: int = 10_000
     device: str = "cuda"
     out: Path | None = None  # default: ckpt dir
@@ -58,6 +61,10 @@ def load_policy(cfg: EvalConfig, device: torch.device) -> tuple[torch.nn.Module,
     pdict["down_dims"] = tuple(pdict["down_dims"])
     if pdict.get("crop_hw") is not None:
         pdict["crop_hw"] = tuple(pdict["crop_hw"])
+    if cfg.sampler is not None:
+        pdict["sampler"] = cfg.sampler
+    if cfg.inference_steps is not None:
+        pdict["inference_steps"] = cfg.inference_steps
     if tc["policy"] == "diffusion":
         policy = DiffusionPolicy(DiffusionConfig(**pdict), store)
     else:

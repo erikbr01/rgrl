@@ -27,6 +27,16 @@ class DiffusionConfig:
     crop_hw: tuple[int, int] | None = (76, 76)  # for 84x84 robomimic images
     train_timesteps: int = 100
     inference_steps: int = 10
+    sampler: str = "ddim"  # ddim (deterministic) | ddpm (stochastic ancestral)
+
+
+# scheduling presets; everything else (arch, horizons) stays at the defaults
+SCHEDULE_PRESETS: dict[str, dict] = {
+    # diffusion_policy (Chi et al.): DDPM ancestral over the full chain
+    "dp": {"sampler": "ddpm", "train_timesteps": 100, "inference_steps": 100},
+    # UMI: shorter trained chain, deterministic 16-step DDIM
+    "umi": {"sampler": "ddim", "train_timesteps": 50, "inference_steps": 16},
+}
 
 
 def cosine_betas(timesteps: int) -> torch.Tensor:
@@ -83,7 +93,16 @@ class DiffusionPolicy(nn.Module):
             ac_t = self.alphas_cumprod[t]
             ac_prev = self.alphas_cumprod[t - ratio] if t - ratio >= 0 else torch.ones_like(ac_t)
             x0 = ((x - (1 - ac_t).sqrt() * eps) / ac_t.sqrt()).clamp(-1, 1)
-            x = ac_prev.sqrt() * x0 + (1 - ac_prev).sqrt() * eps  # DDIM, eta=0
+            if cfg.sampler == "ddim":  # deterministic, eta=0
+                x = ac_prev.sqrt() * x0 + (1 - ac_prev).sqrt() * eps
+            else:  # ddpm: ancestral step with fixed_small posterior variance
+                alpha_eff = ac_t / ac_prev
+                beta_eff = 1 - alpha_eff
+                mean = (
+                    ac_prev.sqrt() * beta_eff * x0 + alpha_eff.sqrt() * (1 - ac_prev) * x
+                ) / (1 - ac_t)
+                var = beta_eff * (1 - ac_prev) / (1 - ac_t)  # 0 at the final step
+                x = mean + var.sqrt() * torch.randn_like(x)
 
         start = cfg.obs_horizon - 1
         return self.action_norm.inverse(x)[:, start : start + cfg.n_action_steps]
