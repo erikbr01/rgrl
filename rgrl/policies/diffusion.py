@@ -25,7 +25,6 @@ class DiffusionConfig:
     n_action_steps: int = 8
     down_dims: tuple[int, ...] = (256, 512, 1024)
     num_kp: int = 32
-    crop_hw: tuple[int, int] | None = (76, 76)  # for 84x84 robomimic images
     train_timesteps: int = 100
     inference_steps: int = 10
     sampler: str = "ddim"  # ddim (deterministic) | ddpm (stochastic ancestral)
@@ -52,10 +51,10 @@ def cosine_betas(timesteps: int) -> torch.Tensor:
 
 
 class DiffusionPolicy(nn.Module):
-    def __init__(self, cfg: DiffusionConfig, store: EpisodeStore):
+    def __init__(self, cfg: DiffusionConfig, store: EpisodeStore, crop_hw: tuple[int, int] | None = None):
         super().__init__()
         self.cfg = cfg
-        crop = cfg.crop_hw if any(s.kind == "image" for s in store.meta.keys.values()) else None
+        crop = crop_hw if any(s.kind == "image" for s in store.meta.keys.values()) else None
         self.enc = ObsEncoder(store, cfg.obs_horizon, crop, num_kp=cfg.num_kp)
         self.act_dim = store.meta.keys["action"].shape[0]
         self.action_norm = Normalizer(KeyNormalizer.from_dict(store.stats["action"]))

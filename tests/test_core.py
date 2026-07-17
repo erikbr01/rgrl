@@ -6,9 +6,9 @@ import torch
 
 from robo_dataset.backends.zarr_backend import ZarrStoreWriter
 from robo_dataset.normalization import fit_key
+from robo_dataset.transforms.gpu_batch import CenterCrop, RandomCrop
 
 from rgrl.dataset import GpuSequenceDataset, Windows
-from rgrl.nets.encoders import center_crop, random_crop
 from rgrl.nets.unet1d import ConditionalUnet1D
 from rgrl.normalize import Normalizer
 from rgrl.store import EpisodeStore, write_sidecars
@@ -83,16 +83,30 @@ def test_normalizer_roundtrip():
 
 
 def test_crops():
-    x = torch.arange(2 * 3 * 8 * 8, dtype=torch.float32).reshape(2, 3, 8, 8)
-    out = random_crop(x, (5, 5), generator=torch.Generator().manual_seed(0))
-    assert out.shape == (2, 3, 5, 5)
-    # crop content must be a contiguous window of the source
-    src_rows = x[0, 0]
-    found = any(
-        torch.equal(out[0, 0], src_rows[i : i + 5, j : j + 5]) for i in range(4) for j in range(4)
-    )
-    assert found
-    assert center_crop(x, (8, 8)).shape == (2, 3, 8, 8)
+    # ObsEncoder's exact usage: (B, T, C, H, W), pad=0 (crop within the image,
+    # no padding), per_timestep=True (independent offset per obs frame).
+    x = torch.arange(2 * 2 * 3 * 8 * 8, dtype=torch.float32).reshape(2, 2, 3, 8, 8)
+    rc = RandomCrop(["img"], size=(5, 5), pad=0, per_timestep=True)
+    torch.manual_seed(0)
+    out = rc({"img": x})["img"]
+    assert out.shape == (2, 2, 3, 5, 5)
+    # crop content must be a contiguous window of the source at each (B, T)
+    for b in range(2):
+        for t in range(2):
+            src = x[b, t, 0]
+            found = any(
+                torch.equal(out[b, t, 0], src[i : i + 5, j : j + 5])
+                for i in range(4)
+                for j in range(4)
+            )
+            assert found
+
+    cc = CenterCrop(["img"], size=(8, 8))
+    assert cc({"img": x})["img"].shape == (2, 2, 3, 8, 8)  # no-op at native size
+    cc5 = CenterCrop(["img"], size=(5, 5))
+    out1 = cc5({"img": x})["img"]
+    out2 = cc5({"img": x})["img"]
+    assert torch.equal(out1, out2)  # deterministic
 
 
 def test_unet_shapes():

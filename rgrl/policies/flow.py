@@ -23,16 +23,15 @@ class FlowConfig:
     n_action_steps: int = 8
     down_dims: tuple[int, ...] = (256, 512, 1024)
     num_kp: int = 32
-    crop_hw: tuple[int, int] | None = (76, 76)
     inference_steps: int = 10
     timestep_scale: float = 1000.0  # sinusoidal embedding resolution for t in [0,1]
 
 
 class FlowPolicy(nn.Module):
-    def __init__(self, cfg: FlowConfig, store: EpisodeStore):
+    def __init__(self, cfg: FlowConfig, store: EpisodeStore, crop_hw: tuple[int, int] | None = None):
         super().__init__()
         self.cfg = cfg
-        crop = cfg.crop_hw if any(s.kind == "image" for s in store.meta.keys.values()) else None
+        crop = crop_hw if any(s.kind == "image" for s in store.meta.keys.values()) else None
         self.enc = ObsEncoder(store, cfg.obs_horizon, crop, num_kp=cfg.num_kp)
         self.act_dim = store.meta.keys["action"].shape[0]
         self.action_norm = Normalizer(KeyNormalizer.from_dict(store.stats["action"]))

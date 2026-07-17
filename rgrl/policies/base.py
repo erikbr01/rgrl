@@ -6,7 +6,12 @@ Batch convention (from GpuSequenceDataset.gather):
     action:  float32 (B, horizon, act_dim)
     action_is_pad: bool (B, horizon)
 
-Normalization stats are registered buffers, so checkpoints are self-contained.
+Normalization stats and data transforms are owned by the module (registered
+buffers / nn.Module transforms held on self), so checkpoints are
+self-contained — no separate normalizer or augmentation artifacts. Transform
+mode (e.g. random-crop-while-training vs. deterministic) comes from
+nn.Module.training, same as nn.Dropout — policy.eval() alone switches
+everything to inference behavior, no explicit flag needed anywhere.
 """
 
 from __future__ import annotations
@@ -17,9 +22,10 @@ import torch
 from robo_dataset.normalization import KeyNormalizer
 from torch import nn
 
-from rgrl.nets.encoders import ResNet18Encoder, center_crop, random_crop
+from rgrl.nets.encoders import ResNet18Encoder
 from rgrl.normalize import Normalizer
 from rgrl.store import EpisodeStore
+from rgrl.transforms import CropTransform, DataPipeline
 
 
 class ObsEncoder(nn.Module):
@@ -37,6 +43,13 @@ class ObsEncoder(nn.Module):
         self.image_keys = sorted(k for k, s in store.meta.keys.items() if s.kind == "image")
         self.state_keys = sorted(k for k, s in store.meta.keys.items() if s.kind == "state")
         self.crop_hw = crop_hw
+        if crop_hw is not None:
+            # per_timestep=True, pad=0: independent crop offset per obs frame,
+            # sampled anywhere in the native image (matches diffusion_policy's
+            # CropRandomizer, the semantics this repo has always used).
+            self.pipeline = DataPipeline(
+                [CropTransform(self.image_keys, size=crop_hw, pad=0, per_timestep=True)]
+            )
 
         self.state_norms = nn.ModuleDict()
         state_dim = 0
@@ -62,11 +75,15 @@ class ObsEncoder(nn.Module):
         for k in self.state_keys:
             x = batch[k].reshape(b, self.obs_horizon, -1)
             feats.append(self.state_norms[k.replace(".", "_")](x))
-        for k in self.image_keys:
-            img = batch[k].reshape(b * self.obs_horizon, *batch[k].shape[2:])
-            img = img.permute(0, 3, 1, 2).float().div_(255.0)  # (B*oh, C, H, W)
+        if self.image_keys:
+            imgs = {
+                k: batch[k].permute(0, 1, 4, 2, 3).float().div_(255.0)  # (B,T,H,W,C) -> (B,T,C,H,W)/255
+                for k in self.image_keys
+            }
             if self.crop_hw is not None:
-                img = random_crop(img, self.crop_hw) if self.training else center_crop(img, self.crop_hw)
-            f = self.encoders[k.replace(".", "_")](img)
-            feats.append(f.reshape(b, self.obs_horizon, -1))
+                imgs = self.pipeline(imgs)
+            for k in self.image_keys:
+                x = imgs[k].reshape(b * self.obs_horizon, *imgs[k].shape[2:])
+                f = self.encoders[k.replace(".", "_")](x)
+                feats.append(f.reshape(b, self.obs_horizon, -1))
         return torch.cat(feats, dim=-1).flatten(1)

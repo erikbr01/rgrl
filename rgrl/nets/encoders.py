@@ -1,8 +1,9 @@
-"""Vision encoder: ResNet-18 (GroupNorm) + SpatialSoftmax, plus GPU-side crops.
+"""Vision encoder: ResNet-18 (GroupNorm) + SpatialSoftmax.
 
 Equivalent to the robomimic ResNet18Conv + SpatialSoftmax stack used by
 Diffusion Policy, but built directly from torchvision — no config factories,
-no global state, compilable with fullgraph=True.
+no global state, compilable with fullgraph=True. Crop augmentation lives in
+rgrl/policies/base.py's ObsEncoder via robo_dataset's RandomCrop/CenterCrop.
 """
 
 from __future__ import annotations
@@ -54,27 +55,3 @@ class ResNet18Encoder(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.pool(self.backbone(x))
-
-
-def random_crop(images: torch.Tensor, out_hw: tuple[int, int], generator=None) -> torch.Tensor:
-    """Batched random crop on GPU. images: (B, C, H, W) -> (B, C, h, w).
-
-    One crop position per batch element (matches per-sample CropRandomizer).
-    """
-    b, c, h, w = images.shape
-    oh, ow = out_hw
-    if (h, w) == (oh, ow):
-        return images
-    ys = torch.randint(0, h - oh + 1, (b,), device=images.device, generator=generator)
-    xs = torch.randint(0, w - ow + 1, (b,), device=images.device, generator=generator)
-    rows = ys[:, None] + torch.arange(oh, device=images.device)[None, :]
-    cols = xs[:, None] + torch.arange(ow, device=images.device)[None, :]
-    out = images[torch.arange(b, device=images.device)[:, None, None], :, rows[:, :, None], cols[:, None, :]]
-    return out.permute(0, 3, 1, 2)
-
-
-def center_crop(images: torch.Tensor, out_hw: tuple[int, int]) -> torch.Tensor:
-    h, w = images.shape[-2:]
-    oh, ow = out_hw
-    y, x = (h - oh) // 2, (w - ow) // 2
-    return images[..., y : y + oh, x : x + ow]
