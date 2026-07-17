@@ -1,0 +1,10 @@
+# fast smoke-test settings: fewer steps, no compile warmup, no val/save/wandb noise
+defaults:
+  - default
+  - _self_
+
+steps: 300
+log_every: 100
+val_every: 100000
+save_every: 100000
+compile: false

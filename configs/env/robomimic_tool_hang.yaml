@@ -1,0 +1,4 @@
+max_steps: 700
+parallel_envs: 10
+episodes: 50
+seed: 10000

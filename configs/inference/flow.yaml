@@ -1,0 +1,5 @@
+sampler: null
+inference_steps: null
+compile: false
+bf16: false
+use_ema: true

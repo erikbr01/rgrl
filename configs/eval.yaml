@@ -1,0 +1,16 @@
+defaults:
+  - inference: diffusion
+  - env: robomimic_lift
+  - override hydra/job_logging: none
+  - _self_
+
+hydra:
+  job:
+    chdir: false
+  output_subdir: null
+  run:
+    dir: .
+
+ckpt: ???
+out: null
+label: null

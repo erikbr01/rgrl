@@ -1,0 +1,8 @@
+# Chi et al. Diffusion Policy: DDPM ancestral over the full trained chain
+defaults:
+  - diffusion
+  - _self_
+
+train_timesteps: 100
+inference_steps: 100
+sampler: ddpm

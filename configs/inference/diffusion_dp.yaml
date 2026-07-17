@@ -1,0 +1,6 @@
+defaults:
+  - diffusion
+  - _self_
+
+sampler: ddpm
+inference_steps: 100

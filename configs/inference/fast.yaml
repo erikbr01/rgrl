@@ -1,0 +1,4 @@
+# compose on top of a schedule preset for deployment-latency inference,
+# e.g. `inference=[diffusion_umi,fast]`: CUDA-graphs the UNet (~2x lower
+# latency; only worth it for long-running sessions, see rgrl/eval_robomimic.py)
+compile: true

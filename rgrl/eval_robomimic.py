@@ -4,10 +4,23 @@ Runs E envs in-process in lockstep: every policy call batches all still-running
 envs, then each env executes the n_action_steps chunk. Episodes end on task
 success or max_steps. Env obs are converted back to the store convention
 (images uint8 HWC, states float32) before batching.
+
+Results land in the checkpoint's experiment directory, one subfolder per eval
+config, so re-sweeping samplers on the same checkpoint doesn't clobber prior
+runs:
+
+    runs/<name>/
+        config.json, latest.pt, train.log      (written by rgrl/train_loop.py)
+        evals/<label>/
+            config.json    the EvalConfig used
+            summary.json   results
+            eval.log       captured stdout
+            rollouts/      reserved for saved videos/trajectories (not yet written)
 """
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import sys
@@ -30,6 +43,7 @@ sys.modules.setdefault(
 import robomimic.utils.env_utils as EnvUtils
 import robomimic.utils.obs_utils as ObsUtils
 
+from rgrl.logutil import tee_stdout
 from rgrl.policies.diffusion import DiffusionConfig, DiffusionPolicy
 from rgrl.policies.flow import FlowConfig, FlowPolicy
 from rgrl.profiler import SectionProfiler
@@ -50,7 +64,8 @@ class EvalConfig:
     inference_steps: int | None = None
     seed: int = 10_000
     device: str = "cuda"
-    out: Path | None = None  # default: ckpt dir
+    out: Path | None = None  # default: ckpt's experiment dir
+    label: str | None = None  # evals/<label>/ ; default: derived from overrides
 
 
 def load_policy(cfg: EvalConfig, device: torch.device) -> tuple[torch.nn.Module, EpisodeStore, int]:
@@ -106,7 +121,24 @@ def obs_frame(raw: dict, image_keys: list[str], state_keys: list[str]) -> dict[s
     return frame
 
 
+def default_label(cfg: EvalConfig) -> str:
+    parts = [cfg.sampler or "sched", str(cfg.inference_steps or "default")]
+    if not cfg.use_ema:
+        parts.append("noema")
+    if cfg.compile:
+        parts.append("compiled")
+    return "_".join(parts)
+
+
 def evaluate(cfg: EvalConfig) -> dict:
+    eval_dir = (cfg.out or cfg.ckpt.parent) / "evals" / (cfg.label or default_label(cfg))
+    eval_dir.mkdir(parents=True, exist_ok=True)
+    with tee_stdout(eval_dir / "eval.log"):
+        return _evaluate(cfg, eval_dir)
+
+
+def _evaluate(cfg: EvalConfig, eval_dir: Path) -> dict:
+    (eval_dir / "config.json").write_text(json.dumps(dataclasses.asdict(cfg), default=str, indent=1))
     device = torch.device(cfg.device)
     torch.manual_seed(cfg.seed)
     policy, store, step = load_policy(cfg, device)
@@ -178,13 +210,13 @@ def evaluate(cfg: EvalConfig) -> dict:
         "policy_ms_per_call": round(1e3 * wall["policy"][0] / max(1, wall["policy"][1]), 2),
         "env_ms_per_step": round(1e3 * wall["env"][0] / max(1, wall["env"][1]), 2),
     }
-    out = (cfg.out or cfg.ckpt.parent) / "summary.json"
-    out.write_text(json.dumps(summary, indent=1))
+    summary_path = eval_dir / "summary.json"
+    summary_path.write_text(json.dumps(summary, indent=1))
     breakdown = prof.report_and_reset()
     print(
         f"success_rate {summary['success_rate']:.2f} ({cfg.episodes} eps) "
         f"wall {summary['wall_s']}s policy {summary['policy_ms_per_call']}ms/call "
-        f"env {summary['env_ms_per_step']}ms/step -> {out}"
+        f"env {summary['env_ms_per_step']}ms/step -> {eval_dir}"
         + (f"  [{breakdown}]" if breakdown else "")
     )
     return summary

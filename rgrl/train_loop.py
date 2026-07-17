@@ -16,6 +16,7 @@ import torch
 
 from rgrl.dataset import GpuSequenceDataset, Windows
 from rgrl.ema import EMA
+from rgrl.logutil import tee_stdout
 from rgrl.policies.diffusion import SCHEDULE_PRESETS, DiffusionConfig, DiffusionPolicy
 from rgrl.policies.flow import FlowConfig, FlowPolicy
 from rgrl.profiler import SectionProfiler, chrome_trace
@@ -60,6 +61,13 @@ def build_policy(cfg: TrainConfig, store: EpisodeStore) -> torch.nn.Module:
 
 
 def train(cfg: TrainConfig) -> Path:
+    out = Path(cfg.out)
+    out.mkdir(parents=True, exist_ok=True)
+    with tee_stdout(out / "train.log"):
+        return _train(cfg, out)
+
+
+def _train(cfg: TrainConfig, out: Path) -> Path:
     if cfg.preset is not None:
         assert cfg.policy == "diffusion", "presets configure the diffusion schedule"
         cfg.diffusion = dataclasses.replace(cfg.diffusion, **SCHEDULE_PRESETS[cfg.preset])
@@ -108,8 +116,6 @@ def train(cfg: TrainConfig) -> Path:
 
         run = wandb.init(project=cfg.wandb_project, config=dataclasses.asdict(cfg))
 
-    out = Path(cfg.out)
-    out.mkdir(parents=True, exist_ok=True)
     (out / "config.json").write_text(json.dumps(dataclasses.asdict(cfg), default=str, indent=1))
 
     def save(step: int):

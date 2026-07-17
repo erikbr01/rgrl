@@ -4,5 +4,7 @@ __pycache__/
 runs/
 data/
 wandb/
+outputs/
+*.log
 *.egg-info/
 .pytest_cache/

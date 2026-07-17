@@ -1,0 +1,6 @@
+defaults:
+  - diffusion
+  - _self_
+
+sampler: ddim
+inference_steps: 16

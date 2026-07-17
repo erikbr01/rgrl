@@ -1,0 +1,8 @@
+# UMI: shorter trained chain, deterministic 16-step DDIM
+defaults:
+  - diffusion
+  - _self_
+
+train_timesteps: 50
+inference_steps: 16
+sampler: ddim
