@@ -21,7 +21,8 @@ class SectionProfiler:
         with prof("data"): batch = ...
         with prof("forward"): loss = ...
         ...
-        print(prof.report_and_reset())   # after torch.cuda.synchronize()
+        breakdown, timings = prof.report_and_reset()   # after torch.cuda.synchronize()
+        print(breakdown)
     """
 
     def __init__(self, device: torch.device, enabled: bool = True):
@@ -55,14 +56,18 @@ class SectionProfiler:
         call before report_and_reset() if you need both."""
         return 1e3 * self._wall[name] / max(1, self._counts[name])
 
-    def report_and_reset(self) -> str:
+    def report_and_reset(self) -> tuple[str, dict[str, float]]:
         """Call after a torch.cuda.synchronize(). Per-step averages:
         'fwd 6.1|5.9ms 47%' means 6.1ms GPU-stream time, 5.9ms CPU wall time
         spent enqueueing that section. gpu >> wall: GPU-bound (normal for
         fwd/bwd). wall ~ gpu in a section that should be instant: the CPU is
-        the bottleneck there."""
+        the bottleneck there.
+
+        Also returns {section: avg_gpu_ms} — the same numbers the string
+        formats, for callers that want to log them (e.g. to wandb) rather
+        than just print them."""
         if not self.enabled or not self._events:
-            return ""
+            return "", {}
         totals = {
             name: sum(s.elapsed_time(e) for s, e in pairs) / len(pairs)
             for name, pairs in self._events.items()
@@ -77,7 +82,7 @@ class SectionProfiler:
         self._events.clear()
         self._wall.clear()
         self._counts.clear()
-        return " | ".join(parts)
+        return " | ".join(parts), totals
 
 
 @contextmanager

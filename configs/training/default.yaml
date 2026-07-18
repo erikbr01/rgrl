@@ -15,5 +15,6 @@ bf16: true
 ema_power: 0.75
 device: cuda
 wandb_project: null
+wandb_name: null
 profile: true
 trace_steps: 0

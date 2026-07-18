@@ -63,6 +63,7 @@ class TrainConfig:
     ema_power: float = 0.75
     device: str = "cuda"
     wandb_project: str | None = None
+    wandb_name: str | None = None
     profile: bool = True  # always-on section timings in every log line
     trace_steps: int = 0  # >0: write a chrome trace of N steps, then continue
 
@@ -137,7 +138,7 @@ def _train(
     if cfg.wandb_project:
         import wandb
 
-        run = wandb.init(project=cfg.wandb_project, config=dataclasses.asdict(cfg))
+        run = wandb.init(project=cfg.wandb_project, name=cfg.wandb_name, config=dataclasses.asdict(cfg))
 
     def full_config() -> dict:
         return {
@@ -149,16 +150,19 @@ def _train(
 
     (out / "config.json").write_text(json.dumps(full_config(), default=str, indent=1))
 
-    def save(step: int):
-        torch.save(
-            {
-                "model": policy.state_dict(),
-                "ema": ema.state_dict(),
-                "config": full_config(),
-                "step": step,
-            },
-            out / "latest.pt",
-        )
+    def save(step: int, keep: bool = False):
+        payload = {
+            "model": policy.state_dict(),
+            "ema": ema.state_dict(),
+            "config": full_config(),
+            "step": step,
+        }
+        torch.save(payload, out / "latest.pt")
+        if keep:
+            # latest.pt is overwritten on every save -- a separate
+            # step-tagged file is what makes checkpoints from earlier in
+            # training (e.g. step 100k vs. 500k) still comparable afterward.
+            torch.save(payload, out / f"checkpoint_{step:07d}.pt")
 
     autocast = torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=cfg.bf16)
     prof = SectionProfiler(device, enabled=cfg.profile)
@@ -203,14 +207,25 @@ def _train(
             avg = loss_sum.item() / cfg.log_every
             loss_sum.zero_()
             eta_min = (cfg.steps - step) / sps / 60
-            breakdown = prof.report_and_reset()
+            breakdown, timings = prof.report_and_reset()
+            epoch = step * cfg.batch_size / data.num_samples
             log.info(
-                f"step {step:>7}/{cfg.steps} loss {avg:.4f} "
+                f"step {step:>7}/{cfg.steps} epoch {epoch:6.2f} loss {avg:.4f} "
                 f"lr {sched.get_last_lr()[0]:.2e} {sps:6.1f} it/s eta {eta_min:5.1f}m"
                 + (f"  [{breakdown}]" if breakdown else "")
             )
             if run:
-                run.log({"loss": avg, "lr": sched.get_last_lr()[0], "it_per_s": sps}, step=step)
+                run.log(
+                    {
+                        "train_loss": avg,
+                        "lr": sched.get_last_lr()[0],
+                        "it_per_s": sps,
+                        "global_step": step,
+                        "epoch": epoch,
+                        **{f"timer/{name}": ms / 1000 for name, ms in timings.items()},
+                    },
+                    step=step,
+                )
             t_log = time.perf_counter()
 
         if val is not None and step % cfg.val_every == 0:
@@ -228,10 +243,10 @@ def _train(
             t_log = time.perf_counter()
 
         if step % cfg.save_every == 0:
-            save(step)
+            save(step, keep=True)
             t_log = time.perf_counter()
 
-    save(cfg.steps)
+    save(cfg.steps, keep=True)
     log.info(f"done -> {out / 'latest.pt'}")
     if run:
         run.finish()

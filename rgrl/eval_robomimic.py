@@ -211,7 +211,7 @@ def _evaluate(
     }
     summary_path = eval_dir / "summary.json"
     summary_path.write_text(json.dumps(summary, indent=1))
-    breakdown = prof.report_and_reset()
+    breakdown, _timings = prof.report_and_reset()
     log.info(
         f"success_rate {summary['success_rate']:.2f} ({env_cfg.episodes} eps) "
         f"wall {summary['wall_s']}s policy {summary['policy_ms_per_call']}ms/call "
