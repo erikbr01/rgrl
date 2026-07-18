@@ -1,6 +1,18 @@
 """The training loop. Flat, single file, fast by default:
 GPU-resident data, bf16 autocast, torch.compile, fused AdamW, fused EMA.
 
+Deliberately NOT CUDA-graphed: capturing the whole step (gather + fwd + bwd
++ fused AdamW) was benchmarked at -6% throughput vs this eager loop
+(A/C interleaved on one GPU to rule out neighbor-process contamination;
+also tried with max-autotune, and with proper main-stream warmup before
+capture) —
+eager's CPU run-ahead already keeps the GPU saturated, and capture forces
+the optimizer onto its slower `capturable` kernel path. nvtop's ~70%
+"effective" utilization is SM occupancy inside the (batch 256, length-16
+conv) kernels, not idle time; the lever that moves it is batch size
+(measured 20k -> 36k samples/s from 256 -> 2048), which is a training-recipe
+change, not a loop change.
+
 train() takes an already-constructed policy and store (built by train.py via
 hydra.utils.instantiate against the real classes — see rgrl/policies/*.py,
 rgrl/store.py) rather than building them itself from a config bundle; this
