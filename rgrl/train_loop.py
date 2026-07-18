@@ -119,12 +119,32 @@ def _train(
     )
 
     ema = EMA(policy, power=cfg.ema_power)
+
+    # Auto-resume: a crash-and-relaunch against the same `out` dir should
+    # continue, not silently restart from step 0 and discard everything
+    # trained so far. Optimizer momentum isn't restored (fused AdamW's
+    # state isn't checkpointed) -- a minor perturbation next step, unlike
+    # losing the trained weights entirely.
+    start_step = 0
+    ckpt_path = out / "latest.pt"
+    if ckpt_path.exists():
+        ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+        policy.load_state_dict(ckpt["model"])
+        ema.load_state_dict(ckpt["ema"])
+        start_step = ckpt["step"]
+        log.info(f"resumed from {ckpt_path} at step {start_step}")
+
     if cfg.compile:
         policy.compute_loss = torch.compile(policy.compute_loss)
 
     opt = torch.optim.AdamW(
         policy.parameters(), lr=cfg.lr, betas=cfg.betas, weight_decay=cfg.weight_decay, fused=True
     )
+    for group in opt.param_groups:
+        # LambdaLR(last_epoch=start_step-1) (the resume path below) requires
+        # this already set -- normally LambdaLR sets it itself, but only
+        # when constructed with the default last_epoch=-1.
+        group["initial_lr"] = cfg.lr
 
     def lr_lambda(step: int) -> float:
         if step < cfg.warmup_steps:
@@ -132,7 +152,7 @@ def _train(
         p = (step - cfg.warmup_steps) / max(1, cfg.steps - cfg.warmup_steps)
         return 0.5 * (1 + math.cos(math.pi * p))
 
-    sched = torch.optim.lr_scheduler.LambdaLR(opt, lr_lambda)
+    sched = torch.optim.lr_scheduler.LambdaLR(opt, lr_lambda, last_epoch=start_step - 1)
 
     run = None
     if cfg.wandb_project:
@@ -169,7 +189,8 @@ def _train(
     loss_sum = torch.zeros((), device=device)
     t_log = time.perf_counter()
     policy.train()
-    batches = data.batches(cfg.batch_size, cfg.seed)
+    steps_per_epoch = max(1, data.num_samples // cfg.batch_size)
+    batches = data.batches(cfg.batch_size, cfg.seed, start_epoch=start_step // steps_per_epoch)
 
     def one_step(step: int):
         nonlocal loss_sum
@@ -187,7 +208,7 @@ def _train(
             ema.step(step)
         loss_sum += loss.detach()
 
-    step = 0
+    step = start_step
     if cfg.trace_steps:
         with chrome_trace(out / "trace.json", cfg.trace_steps) as tracer:
             for step in range(cfg.trace_steps + 3):  # wait=1 + warmup=2
