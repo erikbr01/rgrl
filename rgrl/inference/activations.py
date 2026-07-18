@@ -18,7 +18,6 @@ Wired in at two points:
 from __future__ import annotations
 
 import numpy as np
-from torch import nn
 
 ACTIVATION_KEY_PREFIX = "act:"
 
