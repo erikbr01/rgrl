@@ -1,9 +1,15 @@
 """Batched robomimic rollout evaluation.
 
-Runs E envs in-process in lockstep: every policy call batches all still-running
-envs, then each env executes the n_action_steps chunk. Episodes end on task
-success or max_steps. Env obs are converted back to the store convention
-(images uint8 HWC, states float32) before batching.
+Runs N robosuite envs in lockstep via rgrl.inference.runner.Runner
+(mode=SYNC, control_hz=None — as fast as possible): every policy call
+batches all still-running envs, then each env executes the n_action_steps
+chunk. Episodes end on task success or max_steps. The env itself
+(rgrl.inference.robomimic_env.RobomimicSimEnv) and the policy
+(rgrl.inference.policy_client.LocalPolicy, or HttpPolicy if `server` is set)
+are the same building blocks rgrl/inference/run_realtime.py uses for
+real-time/DROID rollouts — this module only owns the batched,
+statistical-eval control flow (episode chunking, success aggregation,
+profiling, result persistence).
 
 Results land in the checkpoint's experiment directory, one subfolder per eval
 config, so re-sweeping samplers on the same checkpoint doesn't clobber prior
@@ -23,47 +29,20 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
-import os
-import sys
 import time
-import types
-from collections import deque
-from contextlib import contextmanager
-from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 
-import numpy as np
 import torch
 
-os.environ.setdefault("MUJOCO_GL", "egl")  # headless rendering; must precede mujoco import
-# robomimic 0.3 hard-imports mujoco_py; robosuite 1.4 uses the mujoco bindings instead
-sys.modules.setdefault(
-    "mujoco_py", types.SimpleNamespace(builder=types.SimpleNamespace(MujocoException=Exception))
-)
-import robomimic.utils.env_utils as EnvUtils
-import robomimic.utils.obs_utils as ObsUtils
-from hydra.utils import instantiate
-
-from rgrl.data import load_store
+from rgrl.inference.checkpoint import InferenceConfig, load_policy  # re-exported, see checkpoint.py
 from rgrl.logutil import log_to_file
 from rgrl.profiler import SectionProfiler
-from rgrl.store import KIND_IMAGE, KIND_STATE, EpisodeStore
+from rgrl.store import KIND_IMAGE, KIND_STATE
 
 log = logging.getLogger(__name__)
 
-
-@dataclass
-class InferenceConfig:
-    """Policy-specific eval-time overrides — configs/inference/*.yaml targets
-    this directly; consumed as-is by evaluate(), never unpacked into
-    something else."""
-
-    use_ema: bool = True
-    bf16: bool = False
-    compile: bool = False  # CUDA-graph the UNet: ~2x lower latency, ~1min warmup
-    sampler: str | None = None  # ddim | ddpm; samplers are a free choice on a trained model
-    inference_steps: int | None = None
+__all__ = ["InferenceConfig", "RolloutConfig", "load_policy", "evaluate"]
 
 
 @dataclass
@@ -76,55 +55,6 @@ class RolloutConfig:
     parallel_envs: int = 10
     episodes: int = 50
     seed: int = 10_000
-
-
-def load_policy(
-    ckpt_path: Path, inference: InferenceConfig, device: torch.device
-) -> tuple[torch.nn.Module, EpisodeStore, int]:
-    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-    tc = ckpt["config"]
-    store = load_store(tc["store"], tc["target"])
-    policy_cfg = dict(tc["policy"])  # the resolved config that built it at train time — _target_ and all
-    if inference.sampler is not None:
-        policy_cfg["sampler"] = inference.sampler
-    if inference.inference_steps is not None:
-        policy_cfg["inference_steps"] = inference.inference_steps
-    policy = instantiate(policy_cfg, store=store)
-    policy.load_state_dict(ckpt["ema" if inference.use_ema else "model"])
-    policy = policy.to(device).eval()
-    if inference.compile:
-        policy.unet = torch.compile(policy.unet, mode="reduce-overhead", fullgraph=True)
-    return policy, store, ckpt["step"]
-
-
-def make_env(store: EpisodeStore, image_keys: list[str], state_keys: list[str]):
-    ObsUtils.initialize_obs_utils_with_obs_specs(
-        {"obs": {"low_dim": state_keys, "rgb": image_keys}}
-    )
-    env_meta = deepcopy(store.meta.env_meta)
-    if image_keys:
-        h, w, _ = store.meta.keys[image_keys[0]].shape
-        env_meta["env_kwargs"].update(
-            camera_names=[k.removesuffix("_image") for k in image_keys],
-            camera_heights=h,
-            camera_widths=w,
-        )
-    env = EnvUtils.create_env_from_metadata(
-        env_meta=env_meta,
-        render=False,
-        render_offscreen=bool(image_keys),
-        use_image_obs=bool(image_keys),
-    )
-    env.env.hard_reset = False  # robosuite hard resets are slow and leak memory
-    return env
-
-
-def obs_frame(raw: dict, image_keys: list[str], state_keys: list[str]) -> dict[str, np.ndarray]:
-    frame = {k: raw[k].astype(np.float32) for k in state_keys}
-    for k in image_keys:
-        # robomimic returns processed CHW float in [0,1]; store convention is uint8 HWC
-        frame[k] = (np.moveaxis(raw[k], 0, -1) * 255).round().astype(np.uint8)
-    return frame
 
 
 def default_label(inference: InferenceConfig) -> str:
@@ -143,82 +73,110 @@ def evaluate(
     out: Path | None = None,  # default: ckpt's experiment dir
     label: str | None = None,  # evals/<label>/ ; default: derived from inference overrides
     device: str = "cuda",
+    server: str | None = None,  # e.g. http://gpubox:5001 -- policy served remotely instead of loaded in-process
 ) -> dict:
     eval_dir = (out or ckpt.parent) / "evals" / (label or default_label(inference))
     eval_dir.mkdir(parents=True, exist_ok=True)
     with log_to_file(eval_dir / "eval.log"):
-        return _evaluate(ckpt, inference, env, torch.device(device), eval_dir)
+        return _evaluate(ckpt, inference, env, torch.device(device), eval_dir, server)
 
 
 def _evaluate(
-    ckpt: Path, inference: InferenceConfig, env_cfg: RolloutConfig, device: torch.device, eval_dir: Path
+    ckpt: Path,
+    inference: InferenceConfig,
+    env_cfg: RolloutConfig,
+    device: torch.device,
+    eval_dir: Path,
+    server: str | None = None,
 ) -> dict:
+    """Runs num_envs parallel robosuite instances in lockstep via the shared
+    rgrl.inference.runner.Runner (mode=SYNC, control_hz=None — as fast as
+    possible, the same behavior this loop always had), rather than a
+    bespoke control loop — see rgrl/inference/runner.py. The policy is
+    loaded in-process (LocalPolicy, the default — identical to before this
+    refactor) or served remotely (HttpPolicy, if `server` is set), behind
+    the same rgrl.inference.policy_client.PolicyBase interface either way.
+    """
     (eval_dir / "config.json").write_text(
         json.dumps(
-            {"ckpt": str(ckpt), "inference": dataclasses.asdict(inference), "env": dataclasses.asdict(env_cfg)},
+            {
+                "ckpt": str(ckpt),
+                "inference": dataclasses.asdict(inference),
+                "env": dataclasses.asdict(env_cfg),
+                "server": server,
+            },
             default=str,
             indent=1,
         )
     )
     torch.manual_seed(env_cfg.seed)
-    policy, store, step = load_policy(ckpt, inference, device)
-    image_keys = sorted(k for k, s in store.meta.keys.items() if s.kind == KIND_IMAGE)
-    state_keys = sorted(k for k, s in store.meta.keys.items() if s.kind == KIND_STATE)
-    oh, n_act = policy.cfg.obs_horizon, policy.cfg.n_action_steps
+
+    from rgrl.inference.policy_client import HttpPolicy, LocalPolicy
+    from rgrl.inference.robomimic_env import RobomimicSimEnv
+    from rgrl.inference.runner import InferenceMode, Runner
 
     n_envs = min(env_cfg.parallel_envs, env_cfg.episodes)
-    envs = [make_env(store, image_keys, state_keys) for _ in range(n_envs)]
 
-    autocast = torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=inference.bf16)
+    if server is not None:
+        policy_client = HttpPolicy(server)
+        meta = policy_client.ensure_meta()
+        shape_meta = meta["shape_meta"]
+        image_keys = sorted(k for k, v in shape_meta["obs"].items() if v.get("type") == "rgb")
+        state_keys = sorted(k for k, v in shape_meta["obs"].items() if v.get("type", "low_dim") != "rgb")
+        action_dim = int(meta["action_dim"])
+        env_meta = meta["env_meta"]
+        n_act = int(meta["n_action_steps"])
+        step = None
+        image_hw = tuple(shape_meta["obs"][image_keys[0]]["shape"][:2]) if image_keys else None
+    else:
+        # warmup_batch_size=n_envs: this loop always calls predict_action at
+        # exactly this batch size, so torch.compile's one-time compilation
+        # cost is paid up front (at LocalPolicy construction) instead of on
+        # the first real runner.run_batch() call below.
+        local_inference = dataclasses.replace(inference, warmup_batch_size=n_envs)
+        policy_client = LocalPolicy(str(ckpt), device=str(device), inference=local_inference)
+        store = policy_client.store
+        image_keys = sorted(k for k, s in store.meta.keys.items() if s.kind == KIND_IMAGE)
+        state_keys = sorted(k for k, s in store.meta.keys.items() if s.kind == KIND_STATE)
+        action_dim = int(store.meta.keys["action"].shape[0])
+        env_meta = store.meta.env_meta
+        n_act = policy_client.policy.cfg.n_action_steps
+        step = policy_client.step
+        image_hw = tuple(store.meta.keys[image_keys[0]].shape[:2]) if image_keys else None
+
+    env = RobomimicSimEnv(
+        env_meta=env_meta,
+        image_keys=image_keys,
+        state_keys=state_keys,
+        action_dim=action_dim,
+        num_envs=n_envs,
+        image_hw=image_hw,
+    )
+
     prof = SectionProfiler(device)
-    wall = {"policy": [0.0, 0], "env": [0.0, 0]}
-
-    @contextmanager
-    def timed(name: str):
-        t0 = time.perf_counter()
-        with prof(name):
-            yield
-        wall[name][0] += time.perf_counter() - t0
-        wall[name][1] += 1
-
-    def batch_of(hist: list[deque], idxs: list[int]) -> dict[str, torch.Tensor]:
-        return {
-            k: torch.from_numpy(np.stack([np.stack([f[k] for f in hist[i]]) for i in idxs])).to(
-                device
-            )
-            for k in state_keys + image_keys
-        }
+    runner = Runner(
+        env=env,
+        policy=policy_client,
+        mode=InferenceMode.SYNC,
+        control_hz=None,  # as fast as possible -- statistical eval, not real-time
+        open_loop_horizon=n_act,
+        max_timesteps=env_cfg.max_steps,
+        profiler=prof,
+    )
 
     successes: list[bool] = []
     t_start = time.perf_counter()
-    for chunk in range(0, env_cfg.episodes, n_envs):
-        n = min(n_envs, env_cfg.episodes - chunk)
-        hist, done = [], [False] * n
-        for i in range(n):
-            np.random.seed(env_cfg.seed + chunk + i)  # robosuite resets use the global numpy RNG
-            hist.append(deque([obs_frame(envs[i].reset(), image_keys, state_keys)] * oh, maxlen=oh))
-        for _ in range(0, env_cfg.max_steps, n_act):
-            if all(done):
-                break
-            # always batch all envs (done ones included): a static batch shape
-            # avoids torch.compile/CUDA-graph recaptures, and batch size is
-            # nearly free (inference is launch-overhead-bound)
-            idxs = list(range(n))
-            with timed("policy"), autocast:
-                actions = policy.predict_action(batch_of(hist, idxs)).float().cpu().numpy()
-            for t in range(n_act):
-                for j, i in enumerate(idxs):
-                    if done[i]:
-                        continue
-                    with timed("env"):
-                        raw, _, _, _ = envs[i].step(actions[j, t])
-                    hist[i].append(obs_frame(raw, image_keys, state_keys))
-                    done[i] = bool(envs[i].is_success()["task"])
-        successes += done
-        log.info(f"episodes {chunk + n:>3}/{env_cfg.episodes} success {sum(successes)}/{len(successes)}")
+    remaining, chunk_num = env_cfg.episodes, 0
+    while remaining > 0:
+        env.set_seed(env_cfg.seed + chunk_num * n_envs)  # matches pre-refactor per-env seeding exactly
+        record = runner.run_batch()
+        take = min(n_envs, remaining)
+        successes += record.dones[:take].tolist()
+        remaining -= take
+        chunk_num += 1
+        log.info(f"episodes {len(successes):>3}/{env_cfg.episodes} success {sum(successes)}/{len(successes)}")
 
-    for e in envs:
-        e.env.close()  # tear down EGL contexts in order, not at interpreter exit
+    env.close()
     if device.type == "cuda":
         torch.cuda.synchronize()
     summary = {
@@ -227,8 +185,8 @@ def _evaluate(
         "ckpt": str(ckpt),
         "step": step,
         "wall_s": round(time.perf_counter() - t_start, 1),
-        "policy_ms_per_call": round(1e3 * wall["policy"][0] / max(1, wall["policy"][1]), 2),
-        "env_ms_per_step": round(1e3 * wall["env"][0] / max(1, wall["env"][1]), 2),
+        "policy_ms_per_call": round(prof.avg_wall_ms("policy"), 2),
+        "env_ms_per_step": round(prof.avg_wall_ms("env"), 2),
     }
     summary_path = eval_dir / "summary.json"
     summary_path.write_text(json.dumps(summary, indent=1))

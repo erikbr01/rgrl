@@ -61,6 +61,20 @@ class DiffusionPolicy(nn.Module):
         ac = torch.cumprod(1.0 - cosine_betas(cfg.train_timesteps), dim=0)
         self.register_buffer("alphas_cumprod", ac)
 
+        # Precomputed once (not per predict_action call) so the per-step
+        # timestep scalar is buffer-backed, stable GPU memory rather than an
+        # ephemeral CPU tensor moved to device on every call — required for
+        # CUDA graph capture (rgrl/inference/cuda_graph.py): capturing a
+        # host-to-device copy from a local variable bakes in that call's
+        # transient host address, which can be freed/reused by the time a
+        # later graph replay reads from it. The CPU-side list is kept only
+        # for the (host-only, sync-free) `if t - ratio >= 0` branch decision.
+        ratio = cfg.train_timesteps // cfg.inference_steps
+        ts = (torch.arange(cfg.inference_steps) * ratio).flip(0)
+        self._sample_ratio = ratio
+        self._sample_timesteps_cpu = ts.tolist()
+        self.register_buffer("_sample_timesteps", ts, persistent=False)
+
     def compute_loss(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
         cond = self.enc(batch)
         actions = self.action_norm(batch["action"])
@@ -83,12 +97,17 @@ class DiffusionPolicy(nn.Module):
         device, dtype = cond.device, cond.dtype
         x = torch.randn(b, cfg.horizon, self.act_dim, device=device, dtype=dtype)
 
-        ratio = cfg.train_timesteps // cfg.inference_steps
-        timesteps = (torch.arange(cfg.inference_steps) * ratio).flip(0)
-        for t in timesteps:
-            eps = self.unet(x, t.to(device), cond)
-            ac_t = self.alphas_cumprod[t]
-            ac_prev = self.alphas_cumprod[t - ratio] if t - ratio >= 0 else torch.ones_like(ac_t)
+        ratio = self._sample_ratio
+        for i, t_cpu in enumerate(self._sample_timesteps_cpu):
+            t = self._sample_timesteps[i]  # buffer-backed GPU scalar -- for the UNet call only
+            eps = self.unet(x, t, cond)
+            # Plain-int indexing (basic, not advanced) rather than indexing
+            # with the tensor `t`: alphas_cumprod[t] triggers a sync-
+            # requiring code path that torch.cuda.graph() capture rejects
+            # outright (confirmed: raises cudaErrorStreamCaptureUnsupported).
+            # alphas_cumprod[t_cpu] is a plain view, same value, no sync.
+            ac_t = self.alphas_cumprod[t_cpu]
+            ac_prev = self.alphas_cumprod[t_cpu - ratio] if t_cpu - ratio >= 0 else torch.ones_like(ac_t)
             x0 = ((x - (1 - ac_t).sqrt() * eps) / ac_t.sqrt()).clamp(-1, 1)
             if cfg.sampler == "ddim":  # deterministic, eta=0
                 x = ac_prev.sqrt() * x0 + (1 - ac_prev).sqrt() * eps

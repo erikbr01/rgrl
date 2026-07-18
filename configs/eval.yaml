@@ -15,3 +15,5 @@ hydra:
 ckpt: ???
 out: null
 label: null
+server: null  # e.g. http://gpubox:5001 -- policy served remotely (rgrl.inference.policy_server)
+              # instead of loaded in-process; unset (default) is unchanged from before

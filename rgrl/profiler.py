@@ -50,6 +50,11 @@ class SectionProfiler:
             self._counts[name] += 1
             self._events[name].append((start, end))
 
+    def avg_wall_ms(self, name: str) -> float:
+        """Per-call CPU wall time (ms) for `name` so far, without resetting —
+        call before report_and_reset() if you need both."""
+        return 1e3 * self._wall[name] / max(1, self._counts[name])
+
     def report_and_reset(self) -> str:
         """Call after a torch.cuda.synchronize(). Per-step averages:
         'fwd 6.1|5.9ms 47%' means 6.1ms GPU-stream time, 5.9ms CPU wall time

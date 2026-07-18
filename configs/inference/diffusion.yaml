@@ -2,6 +2,6 @@ _target_: rgrl.eval_robomimic.InferenceConfig
 # no override: sample with whatever schedule the checkpoint was trained/configured with
 sampler: null
 inference_steps: null
-compile: false
+compile: true  # torch.compile the UNet; on by default, inference latency matters
 bf16: false
 use_ema: true

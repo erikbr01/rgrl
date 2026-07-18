@@ -1,4 +1,10 @@
-# compose on top of a schedule preset for deployment-latency inference,
-# e.g. `inference=[diffusion_umi,fast]`: CUDA-graphs the UNet (~2x lower
-# latency; only worth it for long-running sessions, see rgrl/eval_robomimic.py)
-compile: true
+# compose on top of a schedule preset for the most aggressive deployment-
+# latency inference, e.g. `inference=[diffusion_umi,fast]`: captures the
+# *whole* predict_action call in one CUDA graph -- eliminates the
+# Python/launch overhead between sampling steps too, on top of `compile`'s
+# (still on, inherited default) Inductor kernel fusion -- load_policy
+# automatically compiles without mode="reduce-overhead" when cuda_graph is
+# set, since that mode's own internal CUDA graph can't be captured inside
+# this outer one. Requires a fixed batch shape for the policy's whole
+# lifetime; see rgrl/inference/cuda_graph.py.
+cuda_graph: true

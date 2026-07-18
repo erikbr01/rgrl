@@ -26,6 +26,7 @@ def main(cfg: DictConfig) -> None:
         env=env,
         out=Path(cfg.out) if cfg.out else None,
         label=cfg.label,
+        server=cfg.server,
     )
 
 

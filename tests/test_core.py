@@ -11,6 +11,7 @@ from robo_dataset.transforms.gpu_batch import CenterCrop, RandomCrop
 from rgrl.dataset import GpuSequenceDataset, Windows
 from rgrl.nets.unet1d import ConditionalUnet1D
 from rgrl.normalize import Normalizer
+from rgrl.policies.diffusion import DiffusionPolicy
 from rgrl.store import EpisodeStore, write_sidecars
 
 
@@ -117,3 +118,26 @@ def test_unet_shapes():
     x = torch.randn(4, 16, 7)
     out = net(x, torch.randint(0, 100, (4,)), torch.randn(4, 20))
     assert out.shape == x.shape
+
+
+def test_diffusion_policy_sample_timesteps_buffer(tiny_store):
+    # rgrl/inference/cuda_graph.py needs these precomputed once, GPU-buffer-
+    # backed rather than an ephemeral per-call CPU tensor (see
+    # DiffusionPolicy.__init__) -- confirm the precomputed schedule matches
+    # the formula it replaced, and predict_action still works end to end.
+    policy = DiffusionPolicy(
+        tiny_store, obs_horizon=2, horizon=4, n_action_steps=2,
+        down_dims=(8, 16), num_kp=4, image_hw=None,
+        train_timesteps=20, inference_steps=5, sampler="ddim",
+    )
+    ratio = 20 // 5
+    expected = (torch.arange(5) * ratio).flip(0).tolist()
+    assert policy._sample_timesteps_cpu == expected
+    assert torch.equal(policy._sample_timesteps, torch.tensor(expected))
+
+    for sampler in ("ddim", "ddpm"):
+        policy.cfg.sampler = sampler
+        batch = {"state": torch.randn(3, 2, 3)}
+        action = policy.predict_action(batch)
+        assert action.shape == (3, 2, 2)
+        assert torch.isfinite(action).all()

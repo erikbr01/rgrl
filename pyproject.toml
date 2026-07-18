@@ -23,6 +23,17 @@ eval = [
     # signature change); 2.3.7 is the newest compatible release
     "mujoco==2.3.7",
     "imageio[ffmpeg]>=2.34",
+    # policy-server client: rgrl/inference/policy_client.py's HttpPolicy.
+    # Deliberately not torch/fastapi — an env-only box never needs the
+    # policy's venv, only this.
+    "requests>=2.31",
+]
+# For the policy-serving box (rgrl/inference/policy_server.py) — never needed
+# on an env-only box (robomimic/robosuite/mujoco, or a real robot), which is
+# the whole point of the HTTP split.
+serve = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.30",
 ]
 
 [build-system]
