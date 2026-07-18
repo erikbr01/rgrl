@@ -35,6 +35,9 @@ serve = [
     "fastapi>=0.110",
     "uvicorn[standard]>=0.30",
 ]
+video = [
+    "av>=12",
+]
 
 [build-system]
 requires = ["hatchling"]

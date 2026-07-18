@@ -1,0 +1,20 @@
+# Two cameras only (wrist_image_right dropped) so the run fits on a single
+# GPU -- wrist_image_left + exterior_image_1_left is the standard DROID pair
+# (see policy_graphs/docs/droid_workflow.md's camera table).
+obs:
+  wrist_image_left:
+    shape: [180, 320, 3]
+    type: rgb
+    channel_order: rgb
+  exterior_image_1_left:
+    shape: [180, 320, 3]
+    type: rgb
+    channel_order: rgb
+  joint_positions:
+    shape: [7]
+    type: low_dim
+  gripper_position:
+    shape: [1]
+    type: low_dim
+action:
+  shape: [8]

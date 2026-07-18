@@ -1,0 +1,26 @@
+name: prepare_tray_baseline
+store_path: /home/erbauer/policy_graphs/data/droid_converted_prepare_tray_trimmed
+abs_action: false
+rename: {}
+shape_meta:
+  obs:
+    wrist_image_left:
+      shape: [180, 320, 3]
+      type: rgb
+      channel_order: rgb
+    wrist_image_right:
+      shape: [180, 320, 3]
+      type: rgb
+      channel_order: rgb
+    exterior_image_1_left:
+      shape: [180, 320, 3]
+      type: rgb
+      channel_order: rgb
+    joint_positions:
+      shape: [7]
+      type: low_dim
+    gripper_position:
+      shape: [1]
+      type: low_dim
+  action:
+    shape: [8]

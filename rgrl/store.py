@@ -20,6 +20,7 @@ silently mismatching the policy's encoder.
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -155,7 +156,26 @@ class EpisodeStore:
         )
 
     def load(self, key: str) -> np.ndarray:
-        return np.ascontiguousarray(self._robo.get_sequence(key, 0, self.meta.num_frames))
+        # Per-episode get_frames() calls, fanned out across threads, instead
+        # of one sequential get_sequence() over the whole store: for a
+        # video-backed store this is the difference between decoding on one
+        # core and decoding on ~16 (video.py's per-(key, episode) decoder
+        # cache is documented thread-safe for exactly this). Cheap for
+        # non-video backends too — a thread pool over near-free zarr reads
+        # costs nothing.
+        n_eps = self.meta.num_episodes
+        if n_eps <= 1:
+            return np.ascontiguousarray(self._robo.get_sequence(key, 0, self.meta.num_frames))
+        ends = self.meta.episode_ends
+        starts = [0] + ends[:-1]
+        with ThreadPoolExecutor(max_workers=min(16, n_eps)) as pool:
+            parts = list(
+                pool.map(
+                    lambda i: self._robo.get_frames(i, key, 0, ends[i] - starts[i]),
+                    range(n_eps),
+                )
+            )
+        return np.ascontiguousarray(np.concatenate(parts, axis=0))
 
     def episode_bounds(self) -> np.ndarray:
         """(num_episodes, 2) array of [start, end) frame indices."""
