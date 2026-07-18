@@ -21,6 +21,7 @@ this module imports cleanly everywhere.
 
 from __future__ import annotations
 
+import threading
 from abc import ABC, abstractmethod
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
@@ -29,11 +30,23 @@ import numpy as np
 
 from rgrl.inference.activations import ACTIVATION_KEY_PREFIX
 from rgrl.inference.obs_window import RollingObsWindow
-from rgrl.inference.wire import decode_batch, encode_batch
+from rgrl.inference.wire import ACTION_PREFIX_KEY, decode_batch, encode_batch
 
 
 class PolicyBase(ABC):
-    """Uniform inference interface: submit (non-blocking) -> get (blocking)."""
+    """Uniform inference interface: observe (every control step) -> submit
+    (non-blocking) -> get (blocking).
+
+    observe/submit are separate calls because obs *history* and inference
+    *timing* run at different rates: policies trained on obs_horizon
+    consecutive frames need every control step's observation to build a
+    correct window, while inference fires only at replan points (every
+    chunk, or at policy_hz). Folding the two into one call is exactly the
+    bug that motivated this split — a window pushed only at submit time
+    holds frames one chunk apart (e.g. [o_{t-8}, o_t]) where training used
+    consecutive frames ([o_{t-1}, o_t]), which silently destroys rollout
+    performance on precise tasks.
+    """
 
     last_activations: dict[str, np.ndarray] | None = None
 
@@ -42,14 +55,30 @@ class PolicyBase(ABC):
         """Called at the start of each episode/batch."""
 
     @abstractmethod
-    def submit(self, obs_batch: dict[str, np.ndarray], instruction: np.ndarray | None = None) -> None:
-        """Kick off inference asynchronously. Does not block.
+    def observe(self, obs_batch: dict[str, np.ndarray]) -> None:
+        """Feed the newest per-step observation (one array per obs key,
+        each (B, *key_shape)). Call after env.reset() and after every
+        env.step() — the Runner does this. Cheap; never blocks."""
 
-        obs_batch: one array per obs key, each shaped (B, *key_shape).
+    @abstractmethod
+    def submit(
+        self,
+        instruction: np.ndarray | None = None,
+        action_prefix: np.ndarray | None = None,
+    ) -> None:
+        """Kick off inference asynchronously on the observations accumulated
+        via observe(). Does not block.
+
         instruction: (B,) array of per-item language prompts for VLA-style
         policies (WebSocketPolicy) — batch-shaped like everything else here,
         not a single Runner-wide constant; ignored by backends running
         rgrl's own (non-language-conditioned) policies.
+        action_prefix: real-time chunking (Runner(rtc=True)) — (B, P,
+        action_dim) unnormalized actions already committed to execute while
+        this inference runs. The policy conditions on them and returns a
+        chunk whose first P actions repeat the prefix; the Runner drops
+        those P before executing. Not supported by WebSocketPolicy (openpi
+        servers do any RTC of their own server-side).
         """
 
     @abstractmethod
@@ -117,6 +146,9 @@ class HttpPolicy(_FuturePolicy):
         self._timeout = timeout
         self.meta: dict | None = None
         self._window: RollingObsWindow | None = None
+        # observe() runs on the control loop; submit() may run on a Runner
+        # streaming thread — guard the shared window.
+        self._window_lock = threading.Lock()
 
     def ensure_meta(self) -> dict:
         """Fetch /meta now if it hasn't been already — lets a caller learn
@@ -139,10 +171,23 @@ class HttpPolicy(_FuturePolicy):
         if self._window is not None:
             self._window.reset()
 
-    def submit(self, obs_batch: dict[str, np.ndarray], instruction: np.ndarray | None = None) -> None:
+    def observe(self, obs_batch: dict[str, np.ndarray]) -> None:
         self.ensure_meta()
-        self._window.push(obs_batch)
-        self._submit_fn(self._post, encode_batch(self._window.window()))
+        with self._window_lock:
+            self._window.push(obs_batch)
+
+    def submit(
+        self,
+        instruction: np.ndarray | None = None,
+        action_prefix: np.ndarray | None = None,
+    ) -> None:
+        if self._window is None or not len(self._window):
+            raise RuntimeError("call observe() with the current obs before submit()")
+        with self._window_lock:
+            arrays = self._window.window()
+        if action_prefix is not None:
+            arrays = {**arrays, ACTION_PREFIX_KEY: np.asarray(action_prefix, dtype=np.float32)}
+        self._submit_fn(self._post, encode_batch(arrays))
 
     def get(self) -> np.ndarray:
         action, self.last_activations = self._get_with_activations()
@@ -197,6 +242,7 @@ class LocalPolicy(_FuturePolicy):
             )
         self._torch = torch
         self._device = torch.device(device)
+        self._window_lock = threading.Lock()  # observe() on control loop vs submit() on streaming thread
         inference = inference or InferenceConfig()
         self.policy, self.store, self.step = load_policy(Path(checkpoint), inference, self._device)
         self._window = RollingObsWindow(self.policy.cfg.obs_horizon)
@@ -223,11 +269,26 @@ class LocalPolicy(_FuturePolicy):
         super().reset()
         self._window.reset()
 
-    def submit(self, obs_batch: dict[str, np.ndarray], instruction: np.ndarray | None = None) -> None:
-        self._window.push(obs_batch)
-        arrays = self._window.window()
+    def observe(self, obs_batch: dict[str, np.ndarray]) -> None:
+        with self._window_lock:
+            self._window.push(obs_batch)
+
+    def submit(
+        self,
+        instruction: np.ndarray | None = None,
+        action_prefix: np.ndarray | None = None,
+    ) -> None:
+        if not len(self._window):
+            raise RuntimeError("call observe() with the current obs before submit()")
+        with self._window_lock:
+            arrays = self._window.window()
         batch = {k: self._torch.as_tensor(v, device=self._device) for k, v in arrays.items()}
-        self._submit_fn(self._infer, batch)
+        prefix = (
+            None
+            if action_prefix is None
+            else self._torch.as_tensor(np.asarray(action_prefix, dtype=np.float32), device=self._device)
+        )
+        self._submit_fn(self._infer, batch, prefix)
 
     def get(self) -> np.ndarray:
         action, self.last_activations = self._future_result()
@@ -240,9 +301,12 @@ class LocalPolicy(_FuturePolicy):
         self._future = None
         return result
 
-    def _infer(self, batch: dict) -> tuple[np.ndarray, dict[str, np.ndarray] | None]:
+    def _infer(self, batch: dict, prefix=None) -> tuple[np.ndarray, dict[str, np.ndarray] | None]:
         with self._torch.no_grad(), self._autocast:
-            action = self._predict.predict_action(batch)
+            if prefix is None:
+                action = self._predict.predict_action(batch)
+            else:
+                action = self._predict.predict_action_rtc(batch, prefix)
         activations = self._capture.pop() if self._capture is not None else None
         return action.float().cpu().numpy(), (activations or None)
 
@@ -280,6 +344,7 @@ class WebSocketPolicy(_FuturePolicy):
         self._wrist_key = wrist_key
         self._state_keys = tuple(state_keys)
         self._client = None
+        self._latest_obs: dict[str, np.ndarray] | None = None
 
     def _get_client(self):
         if self._client is None:
@@ -290,9 +355,24 @@ class WebSocketPolicy(_FuturePolicy):
             self._client = websocket_client_policy.WebsocketClientPolicy(host, int(port))
         return self._client
 
-    def submit(self, obs_batch: dict[str, np.ndarray], instruction: np.ndarray | None = None) -> None:
+    def observe(self, obs_batch: dict[str, np.ndarray]) -> None:
+        # openpi/pi0 consumes only the current frame — keep just the latest.
+        self._latest_obs = obs_batch
+
+    def submit(
+        self,
+        instruction: np.ndarray | None = None,
+        action_prefix: np.ndarray | None = None,
+    ) -> None:
+        if action_prefix is not None:
+            # openpi's wire format has no client-supplied prefix (pi0.5-style
+            # RTC happens server-side), and Runner(rtc=True) would then drop
+            # real actions from a reply that never contained the prefix.
+            raise ValueError("WebSocketPolicy does not support action_prefix -- run without rtc=True")
+        if self._latest_obs is None:
+            raise RuntimeError("call observe() with the current obs before submit()")
         prompt = "" if instruction is None else str(instruction[0])  # one robot: drop the batch dim
-        self._submit_fn(self._infer, self._build_request(obs_batch, prompt))
+        self._submit_fn(self._infer, self._build_request(self._latest_obs, prompt))
 
     def _build_request(self, obs_batch: dict[str, np.ndarray], prompt: str) -> dict:
         from openpi_client import image_tools

@@ -9,3 +9,8 @@ image_hw: [76, 76]
 train_timesteps: 100
 inference_steps: 10
 sampler: ddim
+# train-time RTC (0 = off): set e.g. 7 to train prefix conditioning for
+# Runner(rtc=True) deployment -- see DiffusionConfig.max_action_prefix
+max_action_prefix: 0
+prefix_conditioning_prob: 1.0
+prefix_noise_scale: 0.05

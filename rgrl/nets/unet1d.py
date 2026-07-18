@@ -67,8 +67,14 @@ class ConditionalUnet1D(nn.Module):
         diffusion_step_embed_dim: int = 128,
         kernel_size: int = 5,
         n_groups: int = 8,
+        out_dim: int | None = None,
     ):
+        """out_dim: channels of the predicted sequence — defaults to
+        input_dim (the usual denoiser case). Differs when the input carries
+        extra conditioning channels the output shouldn't reproduce, e.g. the
+        prefix mask for train-time RTC (see rgrl/policies/diffusion.py)."""
         super().__init__()
+        out_dim = input_dim if out_dim is None else out_dim
         dsed = diffusion_step_embed_dim
         self.step_encoder = nn.Sequential(
             SinusoidalPosEmb(dsed), nn.Linear(dsed, dsed * 4), nn.Mish(), nn.Linear(dsed * 4, dsed)
@@ -116,7 +122,7 @@ class ConditionalUnet1D(nn.Module):
 
         self.final = nn.Sequential(
             Conv1dBlock(down_dims[0], down_dims[0], kernel_size, n_groups),
-            nn.Conv1d(down_dims[0], input_dim, 1),
+            nn.Conv1d(down_dims[0], out_dim, 1),
         )
 
     def forward(self, x: torch.Tensor, timestep: torch.Tensor, global_cond: torch.Tensor) -> torch.Tensor:

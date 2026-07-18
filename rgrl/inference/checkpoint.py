@@ -98,6 +98,9 @@ def load_policy(
     policy.load_state_dict(ckpt["ema" if inference.use_ema else "model"])
     policy = policy.to(device).eval()
 
+    # the policy's denoiser module -- "unet" on Diffusion/FlowPolicy, "net"
+    # on DiTFlowPolicy; this is what compile targets
+    net_attr = "unet" if hasattr(policy, "unet") else "net"
     if inference.compile:
         if device.type != "cuda":
             log.info("InferenceConfig.compile=True ignored -- device %s is not cuda", device)
@@ -112,10 +115,13 @@ def load_policy(
             # rgrl/inference/cuda_graph.py) triggers compilation too,
             # rather than wastefully compiling for a shape that gets
             # thrown away.
-            policy.unet = torch.compile(policy.unet, fullgraph=True)
+            setattr(policy, net_attr, torch.compile(getattr(policy, net_attr), fullgraph=True))
             log.info("compiled (fullgraph, no reduce-overhead -- composing with cuda_graph)")
         else:
-            policy.unet = torch.compile(policy.unet, mode="reduce-overhead", fullgraph=True)
+            setattr(
+                policy, net_attr,
+                torch.compile(getattr(policy, net_attr), mode="reduce-overhead", fullgraph=True),
+            )
             if inference.warmup_batch_size:
                 autocast = torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=inference.bf16)
                 dummy = _dummy_batch(store, policy.cfg.obs_horizon, inference.warmup_batch_size, device)

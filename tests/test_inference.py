@@ -83,22 +83,45 @@ class MockEnv:
 
 
 class MockPolicy(PolicyBase):
-    """Returns a fixed-value action chunk of the requested batch shape."""
+    """Returns a distinguishable action chunk: every action in the chunk from
+    submit #s at within-chunk position j has value 100*s + j. Honors the RTC
+    contract — a submitted action_prefix comes back verbatim at the chunk's
+    head, with n_action_steps fresh actions after it. Records every observed
+    obs and the obs window (last 2 observes) present at each submit."""
 
     def __init__(self, action_dim: int, n_action_steps: int):
         self.action_dim = action_dim
         self.n_action_steps = n_action_steps
         self.n_submits = 0
+        self.n_observes = 0
+        self.prefixes = []  # the action_prefix (or None) of every submit, in order
+        self.submit_windows = []  # [prev_obs, latest_obs] at each submit
+        self._recent = []
         self._pending = None
 
     def reset(self):
         self._pending = None
+        self._recent = []
 
-    def submit(self, obs_batch, instruction=None):
+    def observe(self, obs_batch):
+        self.n_observes += 1
+        self._latest_obs = obs_batch
+        self._recent = (self._recent + [obs_batch])[-2:]
+
+    def submit(self, instruction=None, action_prefix=None):
         self.n_submits += 1
         self.last_instruction = instruction
-        b = next(iter(obs_batch.values())).shape[0]
-        self._pending = np.ones((b, self.n_action_steps, self.action_dim), dtype=np.float32)
+        self.prefixes.append(None if action_prefix is None else np.array(action_prefix))
+        self.submit_windows.append(list(self._recent))
+        b = next(iter(self._latest_obs.values())).shape[0]
+        fresh = np.stack(
+            [np.full((b, self.action_dim), 100 * self.n_submits + j, dtype=np.float32)
+             for j in range(self.n_action_steps)],
+            axis=1,
+        )
+        if action_prefix is not None:
+            fresh = np.concatenate([np.asarray(action_prefix, dtype=np.float32), fresh], axis=1)
+        self._pending = fresh
 
     def get(self):
         assert self._pending is not None, "get() called before submit()"
@@ -168,6 +191,86 @@ def test_sync_mode_with_no_pacing_matches_bulk_eval_shape():
     assert record.num_envs == 4
     assert record.n_steps == 16
     assert record.n_new_chunks == 2  # requery every 8 steps over 16 steps
+
+
+def test_policy_observes_every_step_and_windows_are_consecutive():
+    """Regression test for the bug that zeroed tool_hang eval: the policy
+    must see EVERY control step's obs (Runner calls observe() per step), so
+    an obs window holds consecutive frames [o_{t-1}, o_t] — not frames one
+    whole chunk apart, which is what pushing obs only at submit time
+    produced (trained on consecutive frames, that silently breaks rollouts)."""
+    env = MockEnv(num_envs=1, action_dim=2)
+    policy = MockPolicy(action_dim=2, n_action_steps=4)
+    runner = Runner(
+        env=env, policy=policy, mode=InferenceMode.SYNC, control_hz=None,
+        open_loop_horizon=4, max_timesteps=12,
+    )
+    runner.run_batch()
+    # reset obs + one per step
+    assert policy.n_observes == 1 + 12
+    # every submit's window is [o_{t-1}, o_t]: consecutive step counters
+    # (MockEnv obs value == its step count), except the first (front-fill)
+    for window in policy.submit_windows[1:]:
+        prev, latest = window[0]["state"][0, 0], window[1]["state"][0, 0]
+        assert latest - prev == 1.0, (prev, latest)
+
+
+class RecordingEnv(MockEnv):
+    """MockEnv that also records every stepped action batch."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.actions = []
+
+    def step(self, actions, active=None):
+        self.actions.append(np.array(actions))
+        return super().step(actions, active)
+
+
+def test_rtc_requires_async_chunk_mode():
+    env = MockEnv(num_envs=1, action_dim=2)
+    policy = MockPolicy(action_dim=2, n_action_steps=4)
+    with pytest.raises(ValueError, match="ASYNC_CHUNK"):
+        Runner(env=env, policy=policy, mode=InferenceMode.SYNC, rtc=True)
+
+
+def test_rtc_sends_queued_actions_as_prefix_and_drops_them_from_the_reply():
+    env = RecordingEnv(num_envs=1, action_dim=2)
+    policy = MockPolicy(action_dim=2, n_action_steps=4)
+    runner = Runner(
+        env=env, policy=policy, mode=InferenceMode.ASYNC_CHUNK, control_hz=None,
+        open_loop_horizon=4, replan_step=0, max_timesteps=8, rtc=True,
+    )
+    record = runner.run_batch()
+    assert record.n_steps == 8
+    assert record.n_new_chunks == 2
+
+    # First submit has no prefix; each replan sends exactly the still-queued
+    # actions of the executing chunk (submit #s produces values 100*s + j).
+    assert policy.prefixes[0] is None
+    np.testing.assert_array_equal(policy.prefixes[1][0, :, 0], [101, 102, 103])
+    np.testing.assert_array_equal(policy.prefixes[2][0, :, 0], [201, 202, 203])
+
+    # Executed actions: chunk 1 in full, then chunk 2's *fresh* actions only
+    # — the prefix repeated at chunk 2's head must have been dropped, never
+    # re-executed.
+    executed = [a[0, 0] for a in env.actions]
+    assert executed == [100, 101, 102, 103, 200, 201, 202, 203]
+
+
+def test_rtc_with_late_replan_sends_shorter_prefix():
+    env = RecordingEnv(num_envs=1, action_dim=2)
+    policy = MockPolicy(action_dim=2, n_action_steps=4)
+    runner = Runner(
+        env=env, policy=policy, mode=InferenceMode.ASYNC_CHUNK, control_hz=None,
+        open_loop_horizon=4, replan_step=2, max_timesteps=8, rtc=True,
+    )
+    runner.run_batch()
+    # replan at i=2 of a 4-step chunk -> one queued action left -> P=1
+    assert policy.prefixes[1].shape == (1, 1, 2)
+    np.testing.assert_array_equal(policy.prefixes[1][0, :, 0], [103])
+    executed = [a[0, 0] for a in env.actions]
+    assert executed == [100, 101, 102, 103, 200, 201, 202, 203]
 
 
 def test_instruction_broadcasts_scalar_to_every_batch_item():

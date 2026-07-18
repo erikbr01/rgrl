@@ -52,17 +52,36 @@ class RolloutConfig:
     task."""
 
     max_steps: int = 400
-    parallel_envs: int = 10
+    # each env instance is its own worker process (rgrl/inference/
+    # robomimic_env.py), so this scales across cores: 25 is ~free on a
+    # 32-core box and cuts a 50-episode eval to 2 batches. Note the policy's
+    # noise draws depend on batch size, so changing this changes which
+    # trajectories get sampled (not their statistics).
+    parallel_envs: int = 25
     episodes: int = 50
     seed: int = 10_000
+    # sync (default): inference blocks between chunks — pure policy-quality
+    # eval. async_chunk: replan mid-chunk from the obs at replan_step, i.e.
+    # each executed chunk is (open_loop_horizon - 1 - replan_step) steps
+    # stale — deployment-realistic replanning. With rtc=true on top, the
+    # still-queued actions are sent as an action_prefix so the policy
+    # conditions on them (real-time chunking; see rgrl/inference/runner.py).
+    # e.g.: eval.py ckpt=... env.mode=async_chunk env.rtc=true
+    mode: str = "sync"
+    replan_step: int = 0  # async_chunk only
+    rtc: bool = False  # async_chunk only
 
 
-def default_label(inference: InferenceConfig) -> str:
+def default_label(inference: InferenceConfig, env: RolloutConfig | None = None) -> str:
     parts = [inference.sampler or "sched", str(inference.inference_steps or "default")]
     if not inference.use_ema:
         parts.append("noema")
     if inference.compile:
         parts.append("compiled")
+    if env is not None and env.mode != "sync":
+        parts.append(env.mode)
+        if env.rtc:
+            parts.append("rtc")
     return "_".join(parts)
 
 
@@ -75,7 +94,7 @@ def evaluate(
     device: str = "cuda",
     server: str | None = None,  # e.g. http://gpubox:5001 -- policy served remotely instead of loaded in-process
 ) -> dict:
-    eval_dir = (out or ckpt.parent) / "evals" / (label or default_label(inference))
+    eval_dir = (out or ckpt.parent) / "evals" / (label or default_label(inference, env))
     eval_dir.mkdir(parents=True, exist_ok=True)
     with log_to_file(eval_dir / "eval.log"):
         return _evaluate(ckpt, inference, env, torch.device(device), eval_dir, server)
@@ -157,10 +176,12 @@ def _evaluate(
     runner = Runner(
         env=env,
         policy=policy_client,
-        mode=InferenceMode.SYNC,
+        mode=InferenceMode(env_cfg.mode),
         control_hz=None,  # as fast as possible -- statistical eval, not real-time
         open_loop_horizon=n_act,
         max_timesteps=env_cfg.max_steps,
+        replan_step=env_cfg.replan_step,
+        rtc=env_cfg.rtc,
         profiler=prof,
     )
 

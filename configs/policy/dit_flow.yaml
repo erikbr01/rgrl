@@ -1,0 +1,18 @@
+# ABC-style DiT + rectified flow with native train-time RTC: per-position
+# timestep conditioning lets committed action prefixes sit clean at t=0
+# while the rest of the chunk is generated to continue them — pair with
+# Runner(rtc=True) / run_realtime --rtc at deployment.
+_target_: rgrl.policies.dit_flow.DiTFlowPolicy
+obs_horizon: 2
+horizon: 16
+n_action_steps: 8
+hidden_size: 512
+depth: 8
+num_heads: 8
+mlp_ratio: 4.0
+num_kp: 32
+image_hw: [76, 76]
+inference_steps: 10
+max_action_prefix: 7  # full horizon tail (16 - 1 - 8); 0 disables prefix training
+prefix_conditioning_prob: 1.0
+prefix_noise_scale: 0.05

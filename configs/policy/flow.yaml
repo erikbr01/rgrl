@@ -7,3 +7,7 @@ num_kp: 32
 image_hw: [76, 76]
 inference_steps: 10
 timestep_scale: 1000.0
+# train-time RTC (0 = off) -- same knobs as policy/diffusion.yaml
+max_action_prefix: 0
+prefix_conditioning_prob: 1.0
+prefix_noise_scale: 0.05

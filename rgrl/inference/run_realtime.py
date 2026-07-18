@@ -45,6 +45,7 @@ class _Args:
     control_hz: float = 15.0
     open_loop_horizon: int = 8
     replan_step: int = 0  # async_chunk only
+    rtc: bool = False  # async_chunk only -- real-time chunking, see rgrl/inference/runner.py
     policy_hz: float | None = None  # async_streaming only
     min_commit_steps: int = 0  # async_streaming only
     num_envs: int = 1  # robomimic only — >1 for several real-time-paced envs at once
@@ -158,6 +159,7 @@ def main() -> None:
         policy_hz=args.policy_hz,
         min_commit_steps=args.min_commit_steps,
         replan_step=args.replan_step,
+        rtc=args.rtc,
     )
 
     successes = []

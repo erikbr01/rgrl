@@ -26,6 +26,9 @@ class RollingObsWindow:
     def reset(self) -> None:
         self._frames.clear()
 
+    def __len__(self) -> int:
+        return len(self._frames)
+
     def push(self, obs_batch: dict[str, np.ndarray]) -> None:
         if not self._frames:
             for _ in range(self.obs_horizon):

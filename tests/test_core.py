@@ -12,6 +12,8 @@ from rgrl.dataset import GpuSequenceDataset, Windows
 from rgrl.nets.unet1d import ConditionalUnet1D
 from rgrl.normalize import Normalizer
 from rgrl.policies.diffusion import DiffusionPolicy
+from rgrl.policies.dit_flow import DiTFlowPolicy
+from rgrl.policies.flow import FlowPolicy
 from rgrl.store import EpisodeStore, write_sidecars
 
 
@@ -141,3 +143,131 @@ def test_diffusion_policy_sample_timesteps_buffer(tiny_store):
         action = policy.predict_action(batch)
         assert action.shape == (3, 2, 2)
         assert torch.isfinite(action).all()
+
+
+def _rtc_policy_checks(policy):
+    """Shared RTC contract: returns (B, P + n_action_steps, act_dim), the
+    first P actions repeat the prefix exactly (inpainting clamps them clean
+    at the end -- only the normalize/inverse roundtrip in between), and an
+    over-long prefix that can't fit in the trained horizon raises."""
+    batch = {"state": torch.randn(3, 2, 3)}
+    prefix = torch.randn(3, 4, 2)
+    out = policy.predict_action_rtc(batch, prefix)
+    assert out.shape == (3, 4 + 2, 2)
+    assert torch.isfinite(out).all()
+    torch.testing.assert_close(out[:, :4], prefix, atol=1e-5, rtol=1e-5)
+
+    # obs offset (1) + prefix (6) + n_action_steps (2) > horizon (8)
+    with pytest.raises(ValueError, match="too long"):
+        policy.predict_action_rtc(batch, torch.randn(3, 6, 2))
+
+
+def test_diffusion_policy_rtc(tiny_store):
+    policy = DiffusionPolicy(
+        tiny_store, obs_horizon=2, horizon=8, n_action_steps=2,
+        down_dims=(8, 16), num_kp=4, image_hw=None,
+        train_timesteps=20, inference_steps=5, sampler="ddim",
+    )
+    for sampler in ("ddim", "ddpm"):
+        policy.cfg.sampler = sampler
+        _rtc_policy_checks(policy)
+
+
+def test_flow_policy_rtc(tiny_store):
+    policy = FlowPolicy(
+        tiny_store, obs_horizon=2, horizon=8, n_action_steps=2,
+        down_dims=(8, 16), num_kp=4, image_hw=None, inference_steps=5,
+    )
+    _rtc_policy_checks(policy)
+
+
+def _trained_rtc_checks(policy):
+    """Train-time RTC contract: loss trains (finite, grads flow to the
+    denoiser), plain predict_action works (all-zero mask / plain t), rtc
+    prefix comes back exactly, and a prefix beyond the trained
+    max_action_prefix raises."""
+    batch = {
+        "state": torch.randn(4, 2, 3),
+        "action": torch.randn(4, 8, 2),
+    }
+    loss = policy.compute_loss(batch)
+    assert torch.isfinite(loss)
+    loss.backward()
+    net = policy.unet if hasattr(policy, "unet") else policy.net
+    assert any(p.grad is not None and torch.isfinite(p.grad).all() for p in net.parameters())
+    policy.zero_grad()
+
+    policy.eval()
+    obs = {"state": torch.randn(3, 2, 3)}
+    action = policy.predict_action(obs)
+    assert action.shape == (3, 2, 2)
+    assert torch.isfinite(action).all()
+
+    prefix = torch.randn(3, 3, 2)
+    out = policy.predict_action_rtc(obs, prefix)
+    assert out.shape == (3, 3 + 2, 2)
+    assert torch.isfinite(out).all()
+    torch.testing.assert_close(out[:, :3], prefix, atol=1e-5, rtol=1e-5)
+
+    # P=4 > trained max_action_prefix=3, even though it fits the horizon
+    with pytest.raises(ValueError, match="max_action_prefix"):
+        policy.predict_action_rtc(obs, torch.randn(3, 4, 2))
+
+
+def test_diffusion_policy_trained_rtc(tiny_store):
+    policy = DiffusionPolicy(
+        tiny_store, obs_horizon=2, horizon=8, n_action_steps=2,
+        down_dims=(8, 16), num_kp=4, image_hw=None,
+        train_timesteps=20, inference_steps=5, sampler="ddim",
+        max_action_prefix=3,
+    )
+    # mask channel: unet input is act_dim + 1
+    assert policy.unet.final[-1].out_channels == 2
+    _trained_rtc_checks(policy)
+
+
+def test_flow_policy_trained_rtc(tiny_store):
+    policy = FlowPolicy(
+        tiny_store, obs_horizon=2, horizon=8, n_action_steps=2,
+        down_dims=(8, 16), num_kp=4, image_hw=None, inference_steps=5,
+        max_action_prefix=3,
+    )
+    _trained_rtc_checks(policy)
+
+
+def test_dit_flow_policy_trained_rtc(tiny_store):
+    policy = DiTFlowPolicy(
+        tiny_store, obs_horizon=2, horizon=8, n_action_steps=2,
+        hidden_size=32, depth=2, num_heads=4, num_kp=4, image_hw=None,
+        inference_steps=5, max_action_prefix=3,
+    )
+    _trained_rtc_checks(policy)
+
+
+def test_dit_flow_policy_without_prefix_training(tiny_store):
+    # max_action_prefix=0: plain flow matching + inpainting-fallback rtc
+    policy = DiTFlowPolicy(
+        tiny_store, obs_horizon=2, horizon=8, n_action_steps=2,
+        hidden_size=32, depth=2, num_heads=4, num_kp=4, image_hw=None,
+        inference_steps=5, max_action_prefix=0,
+    )
+    batch = {"state": torch.randn(4, 2, 3), "action": torch.randn(4, 8, 2)}
+    assert torch.isfinite(policy.compute_loss(batch))
+    policy.eval()
+    obs = {"state": torch.randn(3, 2, 3)}
+    prefix = torch.randn(3, 4, 2)
+    out = policy.predict_action_rtc(obs, prefix)
+    assert out.shape == (3, 4 + 2, 2)
+    torch.testing.assert_close(out[:, :4], prefix, atol=1e-5, rtol=1e-5)
+
+
+def test_rtc_matches_plain_predict_shapes(tiny_store):
+    # plain predict_action is untouched by the _sample refactor
+    policy = DiffusionPolicy(
+        tiny_store, obs_horizon=2, horizon=8, n_action_steps=2,
+        down_dims=(8, 16), num_kp=4, image_hw=None,
+        train_timesteps=20, inference_steps=5, sampler="ddim",
+    )
+    action = policy.predict_action({"state": torch.randn(3, 2, 3)})
+    assert action.shape == (3, 2, 2)
+    assert torch.isfinite(action).all()

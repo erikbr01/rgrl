@@ -71,6 +71,16 @@ class GraphedPolicy:
         self._static_batch: dict[str, torch.Tensor] | None = None
         self._static_output: torch.Tensor | None = None
         self._signature: _Signature | None = None
+        # Separate graph for the RTC path (predict_action_rtc) — a distinct
+        # captured program with its own static prefix input, mirroring the
+        # ABC reference's FastRTCInferenceGraph alongside FastInferenceGraph.
+        # Both coexist: an RTC deployment's first chunk of each episode has
+        # no prefix (plain graph), every later chunk does (rtc graph).
+        self._rtc_graph: torch.cuda.CUDAGraph | None = None
+        self._rtc_static_batch: dict[str, torch.Tensor] | None = None
+        self._rtc_static_prefix: torch.Tensor | None = None
+        self._rtc_static_output: torch.Tensor | None = None
+        self._rtc_signature: tuple | None = None
 
     def predict_action(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
         sig = {k: (tuple(v.shape), v.dtype) for k, v in batch.items()}
@@ -107,4 +117,49 @@ class GraphedPolicy:
 
         for _ in range(self.replay_warmups):
             self._graph.replay()
+        torch.cuda.synchronize()
+
+    def predict_action_rtc(self, batch: dict[str, torch.Tensor], action_prefix: torch.Tensor) -> torch.Tensor:
+        """Graphed counterpart of the policy's predict_action_rtc (see
+        rgrl/policies/diffusion.py) — same contract, captured separately
+        from the plain path since the prefix is an additional static input
+        and the captured program differs (the inpainting clamps)."""
+        sig = (
+            {k: (tuple(v.shape), v.dtype) for k, v in batch.items()},
+            (tuple(action_prefix.shape), action_prefix.dtype),
+        )
+        if self._rtc_graph is None:
+            log.info("capturing RTC CUDA graph for signature %s", sig)
+            self._capture_rtc(batch, action_prefix, sig)
+        elif sig != self._rtc_signature:
+            raise RuntimeError(
+                f"GraphedPolicy's RTC graph was captured for signature {self._rtc_signature}, "
+                f"got {sig} -- construct a separate GraphedPolicy per distinct batch/prefix shape."
+            )
+        for k, v in batch.items():
+            self._rtc_static_batch[k].copy_(v)
+        self._rtc_static_prefix.copy_(action_prefix)
+        self._rtc_graph.replay()
+        return self._rtc_static_output
+
+    def _capture_rtc(self, batch: dict[str, torch.Tensor], action_prefix: torch.Tensor, sig: tuple) -> None:
+        self._rtc_signature = sig
+        self._rtc_static_batch = {k: v.clone() for k, v in batch.items()}
+        self._rtc_static_prefix = action_prefix.clone()
+
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            for _ in range(self.warmup_steps):
+                self.policy.predict_action_rtc(self._rtc_static_batch, self._rtc_static_prefix)
+        torch.cuda.current_stream().wait_stream(stream)
+
+        self._rtc_graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(self._rtc_graph):
+            self._rtc_static_output = self.policy.predict_action_rtc(
+                self._rtc_static_batch, self._rtc_static_prefix
+            )
+
+        for _ in range(self.replay_warmups):
+            self._rtc_graph.replay()
         torch.cuda.synchronize()

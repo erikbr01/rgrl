@@ -1,5 +1,11 @@
 _target_: rgrl.eval_robomimic.RolloutConfig
 max_steps: 700
-parallel_envs: 10
+parallel_envs: 25
 episodes: 50
 seed: 10000
+# sync: pure policy-quality eval. async_chunk: deployment-realistic replanning
+# (each chunk executes from a stale plan); + rtc: condition on in-flight
+# actions (real-time chunking) -- see RolloutConfig in rgrl/eval_robomimic.py
+mode: sync
+replan_step: 0
+rtc: false

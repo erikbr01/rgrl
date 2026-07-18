@@ -27,6 +27,18 @@ ASYNC_CHUNK
     inference runs in the background; block for the new chunk only at the
     chunk boundary.
 
+    With `rtc=True` (real-time chunking, after https://github.com/amazon-far/abc
+    and the Physical Intelligence RTC paper): each replan additionally sends
+    the still-queued actions of the current chunk as an `action_prefix`, so
+    the policy conditions its new chunk on the actions that will execute
+    during inference latency (inference-time inpainting — see
+    predict_action_rtc in rgrl/policies/diffusion.py) and continues them
+    smoothly instead of jumping at the chunk boundary. The returned chunk
+    repeats the prefix at its head; the Runner drops those P actions before
+    executing. Requires the policy's trained horizon to have room past
+    n_action_steps for the prefix: P = open_loop_horizon - 1 - replan_step
+    must be ≤ horizon - (obs_horizon-1) - n_action_steps.
+
 ASYNC_STREAMING
     A dedicated background thread calls submit -> get in a loop, always
     using the latest observation, throttled to at most `policy_hz`. A
@@ -117,8 +129,15 @@ class Runner:
         policy_hz: float | None = None,
         min_commit_steps: int = 0,
         replan_step: int = 0,
+        rtc: bool = False,
         profiler: Profiler | None = None,
     ) -> None:
+        if rtc and mode != InferenceMode.ASYNC_CHUNK:
+            raise ValueError(
+                "rtc=True requires mode=ASYNC_CHUNK: real-time chunking conditions the "
+                "next chunk on actions executing during inference latency, which only "
+                "exists when replanning overlaps execution at fixed chunk boundaries."
+            )
         self.env = env
         self.policy = policy
         self.mode = mode
@@ -129,6 +148,7 @@ class Runner:
         self.policy_hz = policy_hz
         self.min_commit_steps = min_commit_steps
         self.replan_step = replan_step
+        self.rtc = rtc
         self._profiler = profiler or _noop_profiler
 
     def run_batch(
@@ -144,12 +164,13 @@ class Runner:
         per-item value here, rather than one Runner-wide constant."""
         obs = self.env.reset()
         self.policy.reset()
+        self.policy.observe(obs)
         instr = self._normalize_instruction(instruction)
         if self.mode == InferenceMode.SYNC:
-            return self._run_sync(obs, instr, stop_event)
+            return self._run_sync(instr, stop_event)
         if self.mode == InferenceMode.ASYNC_CHUNK:
-            return self._run_async_chunk(obs, instr, stop_event)
-        return self._run_async_streaming(obs, instr, stop_event)
+            return self._run_async_chunk(instr, stop_event)
+        return self._run_async_streaming(instr, stop_event)
 
     def _normalize_instruction(self, instruction: str | list[str] | None) -> np.ndarray | None:
         if instruction is None:
@@ -167,7 +188,7 @@ class Runner:
     # ------------------------------------------------------------------
 
     def _run_sync(
-        self, obs: dict, instruction: np.ndarray | None, stop_event: threading.Event | None
+        self, instruction: np.ndarray | None, stop_event: threading.Event | None
     ) -> BatchRecord:
         B = self.env.num_envs
         dt = 1.0 / self.control_hz if self.control_hz else None
@@ -188,7 +209,7 @@ class Runner:
             if chunk is None or chunk_idx >= self.open_loop_horizon or chunk_idx >= chunk.shape[1]:
                 t_inf = time.time()
                 with self._profiler("policy"):
-                    self.policy.submit(obs, instruction)
+                    self.policy.submit(instruction)
                     chunk = self.policy.get()  # (B, T, action_dim)
                 latencies.append((time.time() - t_inf) * 1000)
                 chunk_idx = 0
@@ -198,6 +219,7 @@ class Runner:
             chunk_idx += 1
             with self._profiler("env"):
                 obs, _, dones_step, _ = self.env.step(actions, active=~done)
+            self.policy.observe(obs)
             done = done | dones_step
             total_steps += 1
 
@@ -213,7 +235,7 @@ class Runner:
     # ------------------------------------------------------------------
 
     def _run_async_chunk(
-        self, obs: dict, instruction: np.ndarray | None, stop_event: threading.Event | None
+        self, instruction: np.ndarray | None, stop_event: threading.Event | None
     ) -> BatchRecord:
         B = self.env.num_envs
         dt = 1.0 / self.control_hz if self.control_hz else None
@@ -223,7 +245,8 @@ class Runner:
 
         t_submit = time.time()
         with self._profiler("policy"):
-            self.policy.submit(obs, instruction)
+            self.policy.submit(instruction)
+        sent_prefix_len = 0  # P of the request currently in flight (rtc only)
 
         total_steps = 0
         t_next = time.time()
@@ -231,9 +254,13 @@ class Runner:
             if stop_event is not None and stop_event.is_set():
                 break
             with self._profiler("policy"):
-                chunk = self.policy.get()  # (B, T, action_dim)
+                chunk = self.policy.get()  # (B, T, action_dim); rtc: (B, P + T, action_dim)
             latencies.append((time.time() - t_submit) * 1000)
             n_chunks += 1
+            if sent_prefix_len:
+                # rtc: the chunk's first P actions repeat the prefix we sent
+                # — they're already executing/executed, start after them.
+                chunk = chunk[:, sent_prefix_len:]
 
             horizon = min(self.open_loop_horizon, chunk.shape[1], self.max_timesteps - total_steps)
             replan_step = min(self.replan_step, horizon - 1)
@@ -249,15 +276,23 @@ class Runner:
 
                 with self._profiler("env"):
                     obs, _, dones_step, _ = self.env.step(chunk[:, i], active=~done)
+                self.policy.observe(obs)
                 done = done | dones_step
                 total_steps += 1
                 if done.all():
                     break
 
                 if i == replan_step:
+                    prefix = None
+                    sent_prefix_len = 0
+                    if self.rtc and i + 1 < horizon:
+                        # Actions committed but not yet executed — exactly
+                        # what runs between this obs and the chunk boundary.
+                        prefix = chunk[:, i + 1 : horizon]
+                        sent_prefix_len = prefix.shape[1]
                     t_submit = time.time()
                     with self._profiler("policy"):
-                        self.policy.submit(obs, instruction)
+                        self.policy.submit(instruction, prefix)
 
         return self._make_record(B, total_steps, n_chunks, 0, latencies, done)
 
@@ -266,13 +301,12 @@ class Runner:
     # ------------------------------------------------------------------
 
     def _run_async_streaming(
-        self, obs: dict, instruction: np.ndarray | None, stop_event: threading.Event | None
+        self, instruction: np.ndarray | None, stop_event: threading.Event | None
     ) -> BatchRecord:
         B = self.env.num_envs
         dt = 1.0 / self.control_hz if self.control_hz else None
 
         lock = threading.Lock()
-        obs_ref: list = [obs]
         buffer_ref: list = [None]
         chunk_step_ref: list = [0]
         last_action_ref: list = [None]
@@ -285,12 +319,13 @@ class Runner:
 
         def _inference_thread() -> None:
             while not stop.is_set():
-                with lock:
-                    curr_obs = obs_ref[0]
                 t0 = time.time()
                 try:
+                    # the main loop feeds every step's obs via policy.observe();
+                    # submit() snapshots the current window (thread-safe in the
+                    # policy backends)
                     with self._profiler("policy"):
-                        self.policy.submit(curr_obs, instruction)
+                        self.policy.submit(instruction)
                         new_chunk = self.policy.get()
                 except Exception as e:  # noqa: BLE001 — keep the loop alive
                     log.warning("inference error: %s", e)
@@ -348,11 +383,9 @@ class Runner:
 
                 with self._profiler("env"):
                     new_obs, _, dones_step, _ = self.env.step(actions, active=~done)
+                self.policy.observe(new_obs)
                 done = done | dones_step
                 total_steps += 1
-
-                with lock:
-                    obs_ref[0] = new_obs
 
                 if dt is not None:
                     elapsed = time.time() - t0

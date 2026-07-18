@@ -17,7 +17,13 @@ GET  /meta     {"obs_horizon", "horizon", "n_action_steps", "action_dim",
                 sim without ever loading the store itself)}
 POST /infer    body: wire.encode_batch bytes, one array per shape_meta obs
                key, each (B, obs_horizon, *key_shape) — uint8 for rgb keys,
-               float32 for low_dim. response: wire.encode_batch bytes,
+               float32 for low_dim. May additionally carry
+               wire.ACTION_PREFIX_KEY ((B, P, action_dim) float32 committed
+               actions): the request is then served by predict_action_rtc —
+               real-time chunking, see rgrl/inference/runner.py — and the
+               returned action chunk is (B, P + n_action_steps, action_dim)
+               with the prefix repeated at its head.
+               response: wire.encode_batch bytes,
                {"action": (B, n_action_steps, action_dim) float32,
                 "act:<layer>": ... for each of InferenceConfig.capture_layers
                 — forward activations captured during this call, for
@@ -38,7 +44,7 @@ from fastapi import FastAPI, Request, Response
 
 from rgrl.inference.activations import ACTIVATION_KEY_PREFIX, ActivationCapture
 from rgrl.inference.checkpoint import InferenceConfig, load_policy, shape_meta_json
-from rgrl.inference.wire import decode_batch, encode_batch
+from rgrl.inference.wire import ACTION_PREFIX_KEY, decode_batch, encode_batch
 
 log = logging.getLogger(__name__)
 
@@ -92,9 +98,13 @@ def build_app(checkpoint: str, device: str = "cuda:0", inference: InferenceConfi
     @app.post("/infer")
     async def infer(request: Request):
         arrays = decode_batch(await request.body())
+        prefix = arrays.pop(ACTION_PREFIX_KEY, None)
         batch = {k: torch.as_tensor(v, device=device_t) for k, v in arrays.items()}
         with torch.no_grad(), autocast:
-            action = predict.predict_action(batch)
+            if prefix is None:
+                action = predict.predict_action(batch)
+            else:
+                action = predict.predict_action_rtc(batch, torch.as_tensor(prefix, device=device_t))
         response = {"action": action.float().cpu().numpy()}
         if capture is not None:
             for layer, act in capture.pop().items():

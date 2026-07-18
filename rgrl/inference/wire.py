@@ -10,6 +10,13 @@ import io
 
 import numpy as np
 
+# Reserved request key for real-time chunking: (B, P, action_dim) float32
+# committed actions sent alongside the obs window — the server routes such
+# requests to predict_action_rtc instead of predict_action. The ":" makes a
+# collision with a real obs key impossible (same convention as
+# rgrl/inference/activations.py's "act:" response prefix).
+ACTION_PREFIX_KEY = "rtc:action_prefix"
+
 
 def encode_batch(arrays: dict[str, np.ndarray]) -> bytes:
     buf = io.BytesIO()
