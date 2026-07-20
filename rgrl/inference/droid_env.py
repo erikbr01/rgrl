@@ -1,9 +1,13 @@
 """Real-world DROID env behind the generic Env contract (rgrl/inference/runner.py).
 
 Wraps `droid.robot_env.RobotEnv` with:
-  - observation preprocessing (BGR/BGRA -> RGB, matching the DROID training
-    data convention -- robo_dataset.backends.droid.DroidStore's MP4 decode
-    path does the identical conversion)
+  - observation preprocessing (BGR/BGRA -> RGB, then resize to `image_hw` if
+    given, matching the DROID training data convention exactly --
+    robo_dataset.backends.droid.DroidStore's MP4 decode path does the
+    identical BGRA->RGB + cv2.resize(..., INTER_AREA)). Real ZED cameras
+    deliver native resolution by default; without this resize, the policy's
+    eval-time CenterCrop would just crop a small region out of a much bigger
+    frame instead of seeing the same whole-scene downsample it trained on.
   - `dry_run` mode for smoke-testing the control loop without hardware
 
 Obs key names match robo_dataset's DroidStore / real trained checkpoints
@@ -59,6 +63,7 @@ class DroidEnv:
         wrist_serial: str = DEFAULT_WRIST_SERIAL,
         ext1_serial: str = DEFAULT_EXT1_SERIAL,
         ext2_serial: str = DEFAULT_EXT2_SERIAL,
+        image_hw: tuple[int, int] | None = None,
         dry_run: bool = False,
     ) -> None:
         if action_space not in ("joint_velocity", "cartesian_velocity", "joint_position"):
@@ -71,6 +76,15 @@ class DroidEnv:
         self.wrist_serial = wrist_serial
         self.ext1_serial = ext1_serial
         self.ext2_serial = ext2_serial
+        # Target (h, w) the checkpoint trained on -- e.g. a checkpoint's
+        # target shape_meta obs image shape. robo_dataset's DroidStore
+        # conversion resizes full camera frames down to this size (see
+        # backends/droid.py); real cameras deliver native ZED resolution
+        # (no resize at the driver level unless configured), so this env
+        # must resize to match or the policy's eval-time CenterCrop just
+        # crops a small region out of a much bigger frame -- a different,
+        # zoomed-in view than the whole-scene downsample it trained on.
+        self.image_hw = image_hw
         self.dry_run = dry_run
 
         # 7-DOF Franka: cartesian = 6+1=7, joint = 7+1=8.
@@ -90,13 +104,17 @@ class DroidEnv:
     def _init_robot(self) -> None:
         try:
             import droid.robot_env as robot_env_mod
+            from droid.camera_utils.info import get_camera_type
         except ImportError as e:
             raise ImportError(f"importing 'droid.robot_env' failed -- this {_DROID_HINT}") from e
-        camera_kwargs = {
-            self.wrist_serial: {"image": True},
-            self.ext1_serial: {"image": True},
-            self.ext2_serial: {"image": True},
-        }
+        # MultiCameraWrapper looks settings up by camera *type* string
+        # ("hand_camera" | "varied_camera" | "fixed_camera"), not by serial
+        # -- keying by serial here silently no-ops every per-camera setting.
+        camera_kwargs = {}
+        for serial in (self.wrist_serial, self.ext1_serial, self.ext2_serial):
+            cam_type = get_camera_type(serial)
+            if cam_type is not None:
+                camera_kwargs[cam_type] = {"image": True}
         self._robot_env = robot_env_mod.RobotEnv(
             action_space=self._robot_action_space, camera_kwargs=camera_kwargs, do_reset=True,
         )
@@ -198,23 +216,25 @@ class DroidEnv:
                 obs[key] = self._preprocess_image(img)
         return obs
 
-    @staticmethod
-    def _preprocess_image(img: np.ndarray) -> np.ndarray:
-        # Only convert colour space — resizing is a policy-server-side concern.
+    def _preprocess_image(self, img: np.ndarray) -> np.ndarray:
         if img.ndim == 3 and img.shape[2] == 4:
             img = cv2.cvtColor(img, cv2.COLOR_BGRA2RGB)
         elif img.ndim == 3 and img.shape[2] == 3:
             img = img[..., ::-1].copy()  # BGR -> RGB
+        if self.image_hw is not None and img.shape[:2] != tuple(self.image_hw):
+            h, w = self.image_hw
+            img = cv2.resize(img, (w, h), interpolation=cv2.INTER_AREA)
         return img
 
     def _dummy_obs(self) -> dict[str, np.ndarray]:
         rng = np.random.default_rng()
+        h, w = self.image_hw if self.image_hw is not None else (180, 320)
         return {
             "joint_positions": rng.random(7).astype(np.float32),
             "gripper_position": rng.random(1).astype(np.float32),
             "cartesian_position": rng.random(6).astype(np.float32),
-            "wrist_image_left": rng.integers(0, 255, (180, 320, 3), dtype=np.uint8),
-            "wrist_image_right": rng.integers(0, 255, (180, 320, 3), dtype=np.uint8),
-            "exterior_image_1_left": rng.integers(0, 255, (180, 320, 3), dtype=np.uint8),
-            "exterior_image_2_left": rng.integers(0, 255, (180, 320, 3), dtype=np.uint8),
+            "wrist_image_left": rng.integers(0, 255, (h, w, 3), dtype=np.uint8),
+            "wrist_image_right": rng.integers(0, 255, (h, w, 3), dtype=np.uint8),
+            "exterior_image_1_left": rng.integers(0, 255, (h, w, 3), dtype=np.uint8),
+            "exterior_image_2_left": rng.integers(0, 255, (h, w, 3), dtype=np.uint8),
         }

@@ -61,7 +61,7 @@ from pathlib import Path
 import numpy as np
 
 from rgrl.inference.droid_env import _DROID_HINT, DroidEnv
-from rgrl.inference.run_realtime import _build_policy
+from rgrl.inference.run_realtime import _meta_from_policy
 from rgrl.inference.runner import InferenceMode, Runner
 
 log = logging.getLogger(__name__)
@@ -377,7 +377,12 @@ def main() -> None:
         inference = InferenceConfig(compile=args.compile, capture_layers=list(args.capture_layers))
         policy = LocalPolicy(args.ckpt, device=args.device, inference=inference)
 
-    env = DroidEnv(action_space=args.action_space, control_hz=args.control_hz, dry_run=args.dry_run)
+    shape_meta = _meta_from_policy(policy)["shape_meta"]
+    image_keys = [k for k, v in shape_meta["obs"].items() if v.get("type") == "rgb"]
+    image_hw = tuple(shape_meta["obs"][image_keys[0]]["shape"][:2]) if image_keys else None
+    env = DroidEnv(
+        action_space=args.action_space, control_hz=args.control_hz, image_hw=image_hw, dry_run=args.dry_run,
+    )
     recording_env = RecordingEnv(env, policy=policy if args.capture_layers else None)
 
     if InferenceMode(args.mode) == InferenceMode.ASYNC_STREAMING and args.capture_layers:
