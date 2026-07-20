@@ -21,7 +21,8 @@ Output layout::
                                         checkpoint's trained shape) -- one
                                         per recorded camera, CRF-18 H.264
         <camera_key>_full.mp4           same frames at native camera
-                                        resolution -- nicer to share
+                                        resolution -- nicer to share;
+                                        omitted if --save-full-res=False
         embeddings_<layer>.npz          (n_steps, *activation_shape) float32,
                                         one file per --capture-layers entry
         metadata.yaml                   index, length, success, note, args
@@ -165,9 +166,10 @@ class RecordingEnv:
     diffusion_policy's DROIDInferenceEnv.step()/pop_episode_data() pairing
     (obs recorded *after* applying the action, paired with that action)."""
 
-    def __init__(self, env, policy=None):
+    def __init__(self, env, policy=None, capture_raw: bool = True):
         self._env = env
         self._policy = policy
+        self._capture_raw = capture_raw
         self._episode_data: list[dict] = []
 
     @property
@@ -184,7 +186,7 @@ class RecordingEnv:
     def step(self, actions: np.ndarray, active: np.ndarray | None = None):
         obs, reward, done, info = self._env.step(actions, active)
         activations = self._policy.last_activations if self._policy is not None else None
-        get_raw = getattr(self._env, "get_raw_images", None)
+        get_raw = getattr(self._env, "get_raw_images", None) if self._capture_raw else None
         self._episode_data.append(
             {
                 "timestep": len(self._episode_data),
@@ -366,6 +368,7 @@ class _Args:
     device: str = "cuda:0"
     compile: bool = True
     capture_layers: tuple[str, ...] = ()
+    save_full_res: bool = True  # also write <camera_key>_full.mp4 at native camera resolution
     dry_run: bool = False
 
 
@@ -405,7 +408,9 @@ def main() -> None:
     env = DroidEnv(
         action_space=args.action_space, control_hz=args.control_hz, image_hw=image_hw, dry_run=args.dry_run,
     )
-    recording_env = RecordingEnv(env, policy=policy if args.capture_layers else None)
+    recording_env = RecordingEnv(
+        env, policy=policy if args.capture_layers else None, capture_raw=args.save_full_res,
+    )
 
     if InferenceMode(args.mode) == InferenceMode.ASYNC_STREAMING and args.capture_layers:
         log.warning(
