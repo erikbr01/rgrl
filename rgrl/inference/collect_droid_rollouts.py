@@ -347,6 +347,8 @@ def _save_episode(
 class _Args:
     output_dir: str
     ckpt: str | None = None
+    # http(s)://host:port. If neither this nor --ckpt is given, defaults to
+    # a same-machine policy_server on its own default host/port.
     server: str | None = None
     num_episodes: int = 10
     instruction: str = ""
@@ -384,9 +386,13 @@ def main() -> None:
         from rgrl.inference.policy_client import HttpPolicy
 
         policy = HttpPolicy(args.server)
+    elif args.ckpt is None:
+        # Neither --server nor --ckpt given: default to a same-machine
+        # policy_server on its own default host/port.
+        from rgrl.inference.policy_client import HttpPolicy
+
+        policy = HttpPolicy("http://127.0.0.1:5001")
     else:
-        if args.ckpt is None:
-            raise ValueError("pass --server URL or --ckpt path")
         from rgrl.inference.checkpoint import InferenceConfig
         from rgrl.inference.policy_client import LocalPolicy
 

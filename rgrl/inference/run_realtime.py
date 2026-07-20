@@ -37,7 +37,10 @@ log = logging.getLogger(__name__)
 class _Args:
     env: str  # "robomimic" | "droid"
     ckpt: str | None = None  # in-process checkpoint (mutually exclusive with --server)
-    server: str | None = None  # http(s)://host:port (rgrl policy_server) or ws(s)://host:port (openpi)
+    # http(s)://host:port (rgrl policy_server) or ws(s)://host:port (openpi).
+    # If neither this nor --ckpt is given, defaults to a same-machine
+    # policy_server on the default host/port (see _build_policy).
+    server: str | None = None
     mode: str = "async_chunk"  # sync | async_chunk | async_streaming
     instruction: str = ""  # language prompt -- openpi/pi0 (--server ws://...) only
     episodes: int = 5
@@ -76,7 +79,11 @@ def _build_policy(args: _Args):
 
         return HttpPolicy(args.server)
     if args.ckpt is None:
-        raise ValueError("pass --server URL or --ckpt path")
+        # Neither --server nor --ckpt given: default to a same-machine
+        # policy_server on its own default host/port.
+        from rgrl.inference.policy_client import HttpPolicy
+
+        return HttpPolicy("http://127.0.0.1:5001")
     from rgrl.inference.checkpoint import InferenceConfig
     from rgrl.inference.policy_client import LocalPolicy
 
