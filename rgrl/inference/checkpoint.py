@@ -1,11 +1,20 @@
-"""Load a trained policy checkpoint — no env dependency at all.
+"""Load a trained policy checkpoint — no env or training-data dependency at all.
 
 Moved out of rgrl/eval_robomimic.py (which imports robomimic/robosuite at
 module level) so a policy-serving process (rgrl/inference/policy_server.py)
-never has to install them: this module only needs torch, hydra, and
-rgrl.data.load_store. rgrl/eval_robomimic.py re-imports InferenceConfig and
-load_policy from here for backward compatibility (configs/inference/*.yaml's
+never has to install them: this module only needs torch and hydra.
+rgrl/eval_robomimic.py re-imports InferenceConfig and load_policy from here
+for backward compatibility (configs/inference/*.yaml's
 _target_: rgrl.eval_robomimic.InferenceConfig keeps resolving unchanged).
+
+load_policy builds its `store` from the checkpoint's own saved shape_meta
+(_ConfigStore) rather than reopening the real training dataset — a
+checkpoint's weights (incl. fitted normalizer buffers) are fully
+self-contained, so nothing about loading it for inference should require
+the original bytes on disk. The one thing this drops is real `env_meta`
+(e.g. robosuite's simulator kwargs): _ConfigStore's is always empty, which
+is fine for real-robot inference (DroidEnv never reads it) but means a
+robomimic sim rollout needs the actual EpisodeStore, not this shortcut.
 """
 
 from __future__ import annotations
@@ -14,11 +23,11 @@ import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import numpy as np
 import torch
 from hydra.utils import instantiate
 
-from rgrl.data import load_store
-from rgrl.store import KIND_IMAGE, EpisodeStore
+from rgrl.store import KIND_ACTION, KIND_IMAGE, KIND_STATE, EpisodeStore, KeySpec, StoreMeta
 
 log = logging.getLogger(__name__)
 
@@ -68,6 +77,51 @@ class InferenceConfig:
 _WARMUP_CALLS = 3  # enough for torch.compile's reduce-overhead mode to finish tracing + CUDA-graph capture
 
 
+class _ConfigStore:
+    """EpisodeStore stand-in built only from a checkpoint's saved target
+    shape_meta -- no training data on disk required.
+
+    Loading a checkpoint for inference never needs the training bytes: the
+    policy's weights (including fitted normalizer scale/offset, wrapped as
+    buffers by rgrl/normalize.py's Normalizer) come entirely from the
+    checkpoint's state_dict. The only thing `store` is for at construction
+    time is telling the policy its own key shapes/kinds -- already frozen
+    into the checkpoint's config -- so this stands in for a real
+    EpisodeStore with placeholder stats (ones/zeros, right shape only;
+    load_state_dict overwrites them immediately after).
+
+    env_meta (e.g. robosuite's simulator kwargs) is a fact about the real
+    recorded data, not the schema, so it's unavailable here (empty) -- fine
+    for real-robot inference, which doesn't consume it; a robomimic sim
+    rollout needs the real EpisodeStore instead.
+    """
+
+    def __init__(self, target_shape_meta: dict):
+        keys: dict[str, KeySpec] = {}
+        for key, spec in target_shape_meta["obs"].items():
+            kind = KIND_IMAGE if spec.get("type", "low_dim") == "rgb" else KIND_STATE
+            keys[key] = KeySpec(
+                shape=list(spec["shape"]),
+                dtype="uint8" if kind == KIND_IMAGE else "float32",
+                kind=kind,
+                channel_order=spec.get("channel_order"),
+                quat_convention=spec.get("quat_convention"),
+            )
+        keys["action"] = KeySpec(
+            shape=list(target_shape_meta["action"]["shape"]), dtype="float32", kind=KIND_ACTION
+        )
+        self.meta = StoreMeta(episode_ends=[], keys=keys, env_meta={})
+        self.stats = {
+            k: {
+                "method": "none",
+                "scale": np.ones(spec.shape, dtype=np.float32).tolist(),
+                "offset": np.zeros(spec.shape, dtype=np.float32).tolist(),
+            }
+            for k, spec in keys.items()
+            if spec.kind != KIND_IMAGE
+        }
+
+
 def _dummy_batch(
     store: EpisodeStore, obs_horizon: int, batch_size: int, device: torch.device
 ) -> dict[str, torch.Tensor]:
@@ -88,7 +142,7 @@ def load_policy(
 ) -> tuple[torch.nn.Module, EpisodeStore, int]:
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     tc = ckpt["config"]
-    store = load_store(tc["store"], tc["target"])
+    store = _ConfigStore(tc["target"])
     policy_cfg = dict(tc["policy"])  # the resolved config that built it at train time — _target_ and all
     if inference.sampler is not None:
         policy_cfg["sampler"] = inference.sampler
