@@ -60,7 +60,7 @@ from pathlib import Path
 
 import numpy as np
 
-from rgrl.inference.droid_env import DroidEnv, _import_droid_module
+from rgrl.inference.droid_env import _DROID_HINT, DroidEnv
 from rgrl.inference.run_realtime import _build_policy
 from rgrl.inference.runner import InferenceMode, Runner
 
@@ -242,7 +242,10 @@ def _write_droid_trajectory(
     action groups) lives there, not reimplemented here, so the file is
     readable by robo_dataset's DroidStore exactly like a teleop session's."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    writer_mod = _import_droid_module("droid.trajectory_utils.trajectory_writer")
+    try:
+        import droid.trajectory_utils.trajectory_writer as writer_mod
+    except ImportError as e:
+        raise ImportError(f"importing 'droid.trajectory_utils.trajectory_writer' failed -- this {_DROID_HINT}") from e
     writer = writer_mod.TrajectoryWriter(
         str(path), metadata={"success": bool(success), "instruction": instruction}, save_images=False
     )
