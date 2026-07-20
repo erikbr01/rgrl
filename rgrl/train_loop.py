@@ -75,17 +75,20 @@ def train(
     policy_cfg: dict,
     store_cfg: dict,
     target_cfg: dict,
+    sample_weights: torch.Tensor | None = None,
 ) -> Path:
     """policy_cfg: the resolved hydra config that built `policy` (has a
     _target_ key) — saved into the checkpoint as-is, so eval_robomimic.py can
     reconstruct it with a single hydra.utils.instantiate() call. store_cfg,
     target_cfg: the resolved data (source) and target shape_meta configs that
     built `store` via rgrl.data.load_store() — saved so eval_robomimic.py can
-    call load_store() again and hit the same cache."""
+    call load_store() again and hit the same cache. sample_weights: optional
+    per-frame curation weight (see rgrl.dataset.GpuSequenceDataset), applied
+    to the train split only — the val split always samples uniformly."""
     out = Path(cfg.out)
     out.mkdir(parents=True, exist_ok=True)
     with log_to_file(out / "train.log"):
-        return _train(cfg, policy, store, policy_cfg, store_cfg, target_cfg, out)
+        return _train(cfg, policy, store, policy_cfg, store_cfg, target_cfg, out, sample_weights)
 
 
 def _train(
@@ -96,6 +99,7 @@ def _train(
     store_cfg: dict,
     target_cfg: dict,
     out: Path,
+    sample_weights: torch.Tensor | None = None,
 ) -> Path:
     device = torch.device(cfg.device)
     torch.manual_seed(cfg.seed)
@@ -103,7 +107,9 @@ def _train(
     torch.backends.cudnn.benchmark = True
 
     windows = Windows(obs_horizon=policy.cfg.obs_horizon, horizon=policy.cfg.horizon)
-    data = GpuSequenceDataset(store, windows, device, cfg.val_episodes, "train")
+    data = GpuSequenceDataset(
+        store, windows, device, cfg.val_episodes, "train", sample_weights=sample_weights
+    )
     val = (
         GpuSequenceDataset(store, windows, device, cfg.val_episodes, "val")
         if cfg.val_episodes

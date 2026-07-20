@@ -78,8 +78,13 @@ def _conversion_code_hashes(source_kind: str) -> dict[str, str]:
 
 
 def _manifest_document(source_cfg: dict, target_shape_meta: dict, source_kind: str) -> dict:
+    # sample_weights_path names a training-time artifact (a curation-score
+    # sweep will point it at a different npy every run), not a property of
+    # the converted data itself — excluding it from the hash means sweeping
+    # scores reuses the same cached store instead of reconverting.
+    hashed_source_cfg = {k: v for k, v in source_cfg.items() if k != "sample_weights_path"}
     doc = {
-        "source_cfg": source_cfg,
+        "source_cfg": hashed_source_cfg,
         "target_shape_meta": target_shape_meta,
         "code_hashes": _conversion_code_hashes(source_kind),
     }
@@ -213,7 +218,11 @@ def _convert_from_store(source_cfg: dict, target_shape_meta: dict, out: Path) ->
     src = open_store(str(store_path))
 
     out.mkdir(parents=True, exist_ok=True)
-    for entry in ("meta.json", "videos", "data"):
+    # meta.json + data/ (or videos/) is enough for a video-backed store, but
+    # a zarr-backed store's ZarrStore.__init__ also reads episode_ends.npy as
+    # a required top-level file (robo_dataset/backends/zarr_backend.py) —
+    # without it, open_store() on the converted cache dir fails outright.
+    for entry in ("meta.json", "episode_ends.npy", "videos", "data"):
         src_entry = store_path / entry
         if src_entry.exists():
             (out / entry).symlink_to(src_entry.resolve())
@@ -233,7 +242,10 @@ def _convert_from_store(source_cfg: dict, target_shape_meta: dict, out: Path) ->
     write_sidecars(
         out,
         stats_keys=stats_keys,
-        env_meta={"abs_action": source_cfg.get("abs_action", False)},
+        # Unlike _convert, there's no source hdf5 to pull env_args from here —
+        # a caller whose store needs eval (a real robomimic env_meta, not
+        # just abs_action) must declare it explicitly on the data config.
+        env_meta={**source_cfg.get("env_meta", {}), "abs_action": source_cfg.get("abs_action", False)},
         source=str(store_path),
         fps=fps,
     )

@@ -12,12 +12,15 @@ boundaries plus boolean pad masks for policies that want to mask loss.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 import numpy as np
 import torch
 
 from rgrl.store import KIND_IMAGE, EpisodeStore
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -41,6 +44,7 @@ class GpuSequenceDataset:
         val_episodes: int = 0,
         val_split: str = "train",
         pin_fallback_gb: float = 20.0,
+        sample_weights: torch.Tensor | None = None,
     ):
         self.windows = windows
         self.device = device
@@ -88,9 +92,41 @@ class GpuSequenceDataset:
         self.act_pad = torch.from_numpy(np.array(act_pad)).to(device)
         self.num_samples = len(self.obs_idx)
 
+        # Per-frame curation weight, aligned to the full store's native frame
+        # order (one scalar per absolute frame index, same order store.load()
+        # returns). Restricted to this split via the same (start, end) ranges
+        # in self.bounds used above to build obs_idx/act_idx, row for row —
+        # so split_weights[i] is exactly the weight of the anchor frame
+        # obs_idx[i] was built from.
+        self.sample_weights: torch.Tensor | None = None
+        if sample_weights is not None:
+            if len(sample_weights) != store.meta.num_frames:
+                raise ValueError(
+                    f"sample_weights has length {len(sample_weights)}, expected "
+                    f"store.meta.num_frames={store.meta.num_frames}"
+                )
+            split_weights = torch.cat(
+                [sample_weights[start:end] for start, end in self.bounds]
+            ).float()
+            if not torch.isfinite(split_weights).all() or (split_weights < 0).any():
+                raise ValueError("sample_weights must be finite and >= 0")
+            if split_weights.sum() <= 0:
+                raise ValueError("sample_weights sum to 0 for this split — nothing to sample")
+            self.sample_weights = split_weights
+            if val_split == "train":
+                total = split_weights.sum()
+                ess = (total**2 / (len(split_weights) * split_weights.square().sum())).item()
+                zero_frac = (split_weights == 0).float().mean().item()
+                log.info(
+                    f"[weighted-sampling] {len(split_weights)} train samples, "
+                    f"ESS={ess:.3f} zero_frac={zero_frac:.3f}"
+                )
+
     def epoch_perm(self, seed: int, epoch: int) -> torch.Tensor:
         g = torch.Generator(device="cpu").manual_seed(seed * 1_000_003 + epoch)
-        return torch.randperm(self.num_samples, generator=g)
+        if self.sample_weights is None:
+            return torch.randperm(self.num_samples, generator=g)
+        return torch.multinomial(self.sample_weights, self.num_samples, replacement=True, generator=g)
 
     def gather(self, sample_ids: torch.Tensor) -> dict[str, torch.Tensor]:
         """sample_ids: (B,) long tensor on any device -> batch dict on self.device."""

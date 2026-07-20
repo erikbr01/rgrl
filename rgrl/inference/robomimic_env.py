@@ -38,6 +38,8 @@ def _worker(conn, env_meta: dict, image_keys: list[str], state_keys: list[str], 
     import robomimic.utils.env_utils as EnvUtils
     import robomimic.utils.obs_utils as ObsUtils
 
+    from rgrl.inference.action_transforms import undo_abs_rotation_action
+
     ObsUtils.initialize_obs_utils_with_obs_specs(
         {"obs": {"low_dim": state_keys, "rgb": image_keys}}
     )
@@ -48,6 +50,12 @@ def _worker(conn, env_meta: dict, image_keys: list[str], state_keys: list[str], 
             camera_heights=h,
             camera_widths=w,
         )
+    # A policy trained against an abs_action store outputs pos+rotation_6d+
+    # gripper per arm; the controller needs pos+axis_angle+gripper and needs
+    # to be told the pose is absolute, not a delta (see action_transforms.py).
+    abs_action = bool(env_meta.get("abs_action", False))
+    if abs_action:
+        env_meta["env_kwargs"]["controller_configs"]["control_delta"] = False
     env = EnvUtils.create_env_from_metadata(
         env_meta=env_meta,
         render=False,
@@ -70,7 +78,8 @@ def _worker(conn, env_meta: dict, image_keys: list[str], state_keys: list[str], 
                 np.random.seed(arg)  # robosuite resets use the global numpy RNG (of THIS process)
                 conn.send(frame(env.reset()))
             elif cmd == "step":
-                raw, _, _, _ = env.step(arg)
+                step_action = undo_abs_rotation_action(arg) if abs_action else arg
+                raw, _, _, _ = env.step(step_action)
                 conn.send((frame(raw), bool(env.is_success()["task"])))
             elif cmd == "close":
                 break

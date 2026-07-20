@@ -78,6 +78,53 @@ def test_epoch_perm_reproducible(tiny_store):
     assert not torch.equal(ds.epoch_perm(1, 5), ds.epoch_perm(1, 6))
 
 
+def test_weighted_epoch_perm_deterministic_and_extreme_skew(tiny_store):
+    n = tiny_store.meta.num_frames
+    weights = torch.zeros(n)
+    weights[0] = 1.0  # only frame 0 has nonzero weight -> every draw is forced to index 0
+    ds = GpuSequenceDataset(
+        tiny_store, Windows(2, 4), torch.device("cpu"), sample_weights=weights
+    )
+    assert torch.equal(ds.epoch_perm(1, 5), ds.epoch_perm(1, 5))
+    assert (ds.epoch_perm(1, 5) == 0).all()  # every draw must be the one nonzero-weight sample
+
+
+def test_weighted_epoch_perm_biases_toward_high_weight(tiny_store):
+    n = tiny_store.meta.num_frames
+    weights = torch.ones(n)
+    weights[0] = 100.0
+    ds = GpuSequenceDataset(
+        tiny_store, Windows(2, 4), torch.device("cpu"), sample_weights=weights
+    )
+    assert torch.equal(ds.epoch_perm(1, 5), ds.epoch_perm(1, 5))
+    assert not torch.equal(ds.epoch_perm(1, 5), ds.epoch_perm(1, 6))  # not degenerate -> varies
+    counts = torch.zeros(ds.num_samples)
+    for epoch in range(20):
+        counts += torch.bincount(ds.epoch_perm(0, epoch), minlength=ds.num_samples)
+    assert (counts[0] / counts.sum()).item() > 0.5  # well above uniform (1/n)
+
+
+def test_sample_weights_validation(tiny_store):
+    n = tiny_store.meta.num_frames
+    with pytest.raises(ValueError, match="length"):
+        GpuSequenceDataset(
+            tiny_store, Windows(2, 4), torch.device("cpu"), sample_weights=torch.ones(n - 1)
+        )
+    with pytest.raises(ValueError, match="finite"):
+        GpuSequenceDataset(
+            tiny_store, Windows(2, 4), torch.device("cpu"),
+            sample_weights=torch.full((n,), float("nan")),
+        )
+    with pytest.raises(ValueError, match="finite"):
+        bad = torch.ones(n)
+        bad[0] = -1.0
+        GpuSequenceDataset(tiny_store, Windows(2, 4), torch.device("cpu"), sample_weights=bad)
+    with pytest.raises(ValueError, match="sum to 0"):
+        GpuSequenceDataset(
+            tiny_store, Windows(2, 4), torch.device("cpu"), sample_weights=torch.zeros(n)
+        )
+
+
 def test_normalizer_roundtrip():
     arr = np.array([[-2.0, 0.0, 5.0], [2.0, 1.0, 5.0]], dtype=np.float32)  # last dim constant
     n = Normalizer(fit_key(arr, "minmax"))

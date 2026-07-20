@@ -8,6 +8,8 @@ the shape_meta a policy trains against. rgrl.data.load_store() diffs the two
 """
 
 import hydra
+import numpy as np
+import torch
 from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
 
@@ -20,6 +22,12 @@ def main(cfg: DictConfig) -> None:
     store = load_store(cfg.data, cfg.target)
     policy = instantiate(cfg.policy, store=store, _convert_="partial")
     training = instantiate(cfg.training, out=cfg.out)
+    sample_weights_path = cfg.data.get("sample_weights_path")
+    sample_weights = (
+        torch.from_numpy(np.load(sample_weights_path).astype(np.float32))
+        if sample_weights_path
+        else None
+    )
     train(
         training,
         policy,
@@ -27,6 +35,7 @@ def main(cfg: DictConfig) -> None:
         OmegaConf.to_container(cfg.policy, resolve=True),
         OmegaConf.to_container(cfg.data, resolve=True),
         OmegaConf.to_container(cfg.target, resolve=True),
+        sample_weights=sample_weights,
     )
 
 
