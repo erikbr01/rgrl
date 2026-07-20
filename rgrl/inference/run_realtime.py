@@ -41,7 +41,7 @@ class _Args:
     # If neither this nor --ckpt is given, defaults to a same-machine
     # policy_server on the default host/port (see _build_policy).
     server: str | None = None
-    mode: str = "async_chunk"  # sync | async_chunk | async_streaming
+    mode: str = "sync"  # sync | async_chunk | async_streaming
     instruction: str = ""  # language prompt -- openpi/pi0 (--server ws://...) only
     episodes: int = 5
     max_timesteps: int = 400
@@ -162,6 +162,12 @@ def main() -> None:
 
     args = tyro.cli(_Args)
     logging.basicConfig(level=logging.INFO, format="[%(name)s] %(message)s")
+    if InferenceMode(args.mode) == InferenceMode.ASYNC_CHUNK and not args.rtc:
+        log.warning(
+            "mode=async_chunk without rtc=True: the new chunk doesn't condition on "
+            "the actions that execute during inference latency, so it can jump at "
+            "chunk boundaries -- pass --rtc, or --mode sync"
+        )
 
     policy = _build_policy(args)
     # WebSocketPolicy (openpi) has no /meta equivalent and does its own

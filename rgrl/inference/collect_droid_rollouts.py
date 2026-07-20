@@ -354,7 +354,7 @@ class _Args:
     server: str | None = None
     num_episodes: int = 10
     instruction: str = ""
-    mode: str = "async_chunk"
+    mode: str = "sync"
     open_loop_horizon: int = 8
     replan_step: int = 0
     rtc: bool = False
@@ -378,6 +378,12 @@ def main() -> None:
     _save_terminal()
     args = tyro.cli(_Args)
     logging.basicConfig(level=logging.INFO, format="[%(name)s] %(message)s")
+    if InferenceMode(args.mode) == InferenceMode.ASYNC_CHUNK and not args.rtc:
+        log.warning(
+            "mode=async_chunk without rtc=True: the new chunk doesn't condition on "
+            "the actions that execute during inference latency, so it can jump at "
+            "chunk boundaries -- pass --rtc, or --mode sync"
+        )
 
     output_dir = Path(args.output_dir)
     recordings = output_dir / "recordings"
