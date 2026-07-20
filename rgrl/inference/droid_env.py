@@ -35,6 +35,13 @@ _DROID_HINT = (
     "present on the robot workstation"
 )
 
+_IMAGE_KEYS = (
+    "wrist_image_left",
+    "wrist_image_right",
+    "exterior_image_1_left",
+    "exterior_image_2_left",
+)
+
 
 class DroidEnv:
     """Env protocol implementation for one physical DROID robot.
@@ -92,6 +99,7 @@ class DroidEnv:
 
         self._robot_env = None
         self._last_obs: dict[str, np.ndarray] | None = None
+        self._last_raw_images: dict[str, np.ndarray] = {}
 
         if not dry_run:
             self._init_robot()
@@ -126,6 +134,7 @@ class DroidEnv:
     def reset(self) -> dict[str, np.ndarray]:
         if self.dry_run:
             obs = self._dummy_obs()
+            self._last_raw_images = {k: v for k, v in obs.items() if k in _IMAGE_KEYS}
         else:
             self._robot_env.reset()
             obs = self._get_obs()
@@ -143,6 +152,7 @@ class DroidEnv:
         action = actions[0]
         if self.dry_run:
             obs = self._dummy_obs()
+            self._last_raw_images = {k: v for k, v in obs.items() if k in _IMAGE_KEYS}
         else:
             robot_action = self._to_robot_action(action, self._last_obs or {})
             self._robot_env.update_robot(
@@ -205,6 +215,7 @@ class DroidEnv:
             ),
             "cartesian_position": np.array(robot_state.get("cartesian_position", np.zeros(6)), dtype=np.float32),
         }
+        raw_images: dict[str, np.ndarray] = {}
         for serial, key, view in (
             (self.wrist_serial, "wrist_image_left", "left"),
             (self.wrist_serial, "wrist_image_right", "right"),
@@ -213,18 +224,32 @@ class DroidEnv:
         ):
             img = image_obs.get(f"{serial}_{view}")
             if img is not None:
-                obs[key] = self._preprocess_image(img)
+                img = self._to_rgb(img)
+                raw_images[key] = img
+                obs[key] = self._resize_to_policy_input(img)
+        self._last_raw_images = raw_images
         return obs
 
-    def _preprocess_image(self, img: np.ndarray) -> np.ndarray:
+    @staticmethod
+    def _to_rgb(img: np.ndarray) -> np.ndarray:
         if img.ndim == 3 and img.shape[2] == 4:
-            img = cv2.cvtColor(img, cv2.COLOR_BGRA2RGB)
-        elif img.ndim == 3 and img.shape[2] == 3:
-            img = img[..., ::-1].copy()  # BGR -> RGB
+            return cv2.cvtColor(img, cv2.COLOR_BGRA2RGB)
+        if img.ndim == 3 and img.shape[2] == 3:
+            return img[..., ::-1].copy()  # BGR -> RGB
+        return img
+
+    def _resize_to_policy_input(self, img: np.ndarray) -> np.ndarray:
         if self.image_hw is not None and img.shape[:2] != tuple(self.image_hw):
             h, w = self.image_hw
-            img = cv2.resize(img, (w, h), interpolation=cv2.INTER_AREA)
+            return cv2.resize(img, (w, h), interpolation=cv2.INTER_AREA)
         return img
+
+    def get_raw_images(self) -> dict[str, np.ndarray]:
+        """Last step's camera frames at native (un-resized) resolution --
+        RGB-converted only. For recording: nicer to share than the
+        policy-input frames, which are downsized to the checkpoint's
+        trained shape."""
+        return dict(self._last_raw_images)
 
     def _dummy_obs(self) -> dict[str, np.ndarray]:
         rng = np.random.default_rng()

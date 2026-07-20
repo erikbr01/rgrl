@@ -17,7 +17,11 @@ Output layout::
                                         written via the droid package's own
                                         TrajectoryWriter -- readable by
                                         robo_dataset's DroidStore)
-        <camera_key>.mp4                one per recorded camera, CRF-18 H.264
+        <camera_key>.mp4                policy-input resolution (the
+                                        checkpoint's trained shape) -- one
+                                        per recorded camera, CRF-18 H.264
+        <camera_key>_full.mp4           same frames at native camera
+                                        resolution -- nicer to share
         embeddings_<layer>.npz          (n_steps, *activation_shape) float32,
                                         one file per --capture-layers entry
         metadata.yaml                   index, length, success, note, args
@@ -180,10 +184,16 @@ class RecordingEnv:
     def step(self, actions: np.ndarray, active: np.ndarray | None = None):
         obs, reward, done, info = self._env.step(actions, active)
         activations = self._policy.last_activations if self._policy is not None else None
+        get_raw = getattr(self._env, "get_raw_images", None)
         self._episode_data.append(
             {
                 "timestep": len(self._episode_data),
                 "obs": {k: np.asarray(v[0]).copy() for k, v in obs.items()},
+                # native-resolution camera frames, if the wrapped env keeps
+                # them (DroidEnv does) -- nicer to share than the
+                # policy-input frames, which are downsized for the
+                # checkpoint's trained shape.
+                "raw_images": {k: v.copy() for k, v in get_raw().items()} if get_raw is not None else None,
                 "action": np.asarray(actions[0], dtype=np.float32).copy(),
                 # drop the leading batch dim (always 1 -- one physical robot),
                 # matching the documented (n_steps, D) embeddings.npz shape.
@@ -299,6 +309,12 @@ def _save_episode(
     for key in camera_keys:
         frames = [entry["obs"][key] for entry in episode_data]
         _write_mp4(ep_dir / f"{key}.mp4", frames, fps=control_hz)
+
+    has_raw = episode_data and episode_data[0].get("raw_images")
+    raw_keys = [k for k in _CAMERA_KEYS if has_raw and k in episode_data[0]["raw_images"]]
+    for key in raw_keys:
+        frames = [entry["raw_images"][key] for entry in episode_data]
+        _write_mp4(ep_dir / f"{key}_full.mp4", frames, fps=control_hz)
 
     for layer in capture_layers:
         values = [
