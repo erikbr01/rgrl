@@ -40,6 +40,7 @@ class InferenceConfig:
 
     use_ema: bool = True
     bf16: bool = False
+    tf32: bool = True  # torch.set_float32_matmul_precision("high"); no-op off cuda
     # torch.compile the UNet (mode="reduce-overhead", its own internal CUDA
     # graph) — on by default since inference latency matters; only applied
     # if device is CUDA (no-ops with a log line on CPU). Pays a one-time
@@ -140,6 +141,9 @@ def _dummy_batch(
 def load_policy(
     ckpt_path: Path, inference: InferenceConfig, device: torch.device
 ) -> tuple[torch.nn.Module, EpisodeStore, int]:
+    if inference.tf32:
+        torch.set_float32_matmul_precision("high")
+
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     tc = ckpt["config"]
     store = _ConfigStore(tc["target"])
