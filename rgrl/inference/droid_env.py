@@ -23,9 +23,6 @@ persistence) -- that's data collection, not inference.
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 import cv2
 import numpy as np
 
@@ -33,19 +30,6 @@ _DROID_HINT = (
     "requires the DROID robot stack ('droid' package + ZED/Franka drivers), "
     "present on the robot workstation"
 )
-
-
-def _import_droid_module(module: str):
-    """Import a droid submodule, with ~/src_droid as a path fallback."""
-    src = Path("~/src_droid").expanduser()
-    if src.is_dir() and str(src) not in sys.path:
-        sys.path.insert(0, str(src))
-    import importlib
-
-    try:
-        return importlib.import_module(module)
-    except ImportError as e:
-        raise ImportError(f"importing {module!r} failed -- this {_DROID_HINT}") from e
 
 
 class DroidEnv:
@@ -104,7 +88,10 @@ class DroidEnv:
         return "joint_velocity" if self._action_space_name == "joint_position" else self._action_space_name
 
     def _init_robot(self) -> None:
-        robot_env_mod = _import_droid_module("droid.robot_env")
+        try:
+            import droid.robot_env as robot_env_mod
+        except ImportError as e:
+            raise ImportError(f"importing 'droid.robot_env' failed -- this {_DROID_HINT}") from e
         camera_kwargs = {
             self.wrist_serial: {"image": True},
             self.ext1_serial: {"image": True},
