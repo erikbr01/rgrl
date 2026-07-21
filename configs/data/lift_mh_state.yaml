@@ -1,0 +1,21 @@
+name: lift_mh_lowdim
+path: /mnt/ssdB/erik/cupid_data/robomimic/datasets/lift/mh/low_dim.hdf5
+abs_action: false
+rename: {}
+shape_meta:
+  obs:
+    object:
+      shape: [10]
+      type: low_dim
+    robot0_eef_pos:
+      shape: [3]
+      type: low_dim
+    robot0_eef_quat:
+      shape: [4]
+      type: low_dim
+      quat_convention: xyzw
+    robot0_gripper_qpos:
+      shape: [2]
+      type: low_dim
+  action:
+    shape: [7]
