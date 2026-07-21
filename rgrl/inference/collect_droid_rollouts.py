@@ -17,12 +17,12 @@ Output layout::
                                         written via the droid package's own
                                         TrajectoryWriter -- readable by
                                         robo_dataset's DroidStore)
-        <camera_key>.mp4                policy-input resolution (the
-                                        checkpoint's trained shape) -- one
-                                        per recorded camera, CRF-18 H.264
-        <camera_key>_full.mp4           same frames at native camera
-                                        resolution -- nicer to share;
-                                        omitted if --save-full-res=False
+        <camera_key>.mp4                native camera resolution (DroidEnv
+                                        hands raw frames to the policy,
+                                        which resizes internally to its
+                                        trained shape -- see
+                                        rgrl.policies.base.ObsEncoder) --
+                                        one per recorded camera, CRF-18 H.264
         embeddings_<layer>.npz          (n_steps, *activation_shape) float32,
                                         one file per --capture-layers entry
         metadata.yaml                   index, length, success, note, args
@@ -66,7 +66,6 @@ from pathlib import Path
 import numpy as np
 
 from rgrl.inference.droid_env import _DROID_HINT, DroidEnv
-from rgrl.inference.run_realtime import _meta_from_policy
 from rgrl.inference.runner import InferenceMode, Runner
 
 log = logging.getLogger(__name__)
@@ -166,10 +165,9 @@ class RecordingEnv:
     diffusion_policy's DROIDInferenceEnv.step()/pop_episode_data() pairing
     (obs recorded *after* applying the action, paired with that action)."""
 
-    def __init__(self, env, policy=None, capture_raw: bool = True):
+    def __init__(self, env, policy=None):
         self._env = env
         self._policy = policy
-        self._capture_raw = capture_raw
         self._episode_data: list[dict] = []
 
     @property
@@ -186,16 +184,10 @@ class RecordingEnv:
     def step(self, actions: np.ndarray, active: np.ndarray | None = None):
         obs, reward, done, info = self._env.step(actions, active)
         activations = self._policy.last_activations if self._policy is not None else None
-        get_raw = getattr(self._env, "get_raw_images", None) if self._capture_raw else None
         self._episode_data.append(
             {
                 "timestep": len(self._episode_data),
                 "obs": {k: np.asarray(v[0]).copy() for k, v in obs.items()},
-                # native-resolution camera frames, if the wrapped env keeps
-                # them (DroidEnv does) -- nicer to share than the
-                # policy-input frames, which are downsized for the
-                # checkpoint's trained shape.
-                "raw_images": {k: v.copy() for k, v in get_raw().items()} if get_raw is not None else None,
                 "action": np.asarray(actions[0], dtype=np.float32).copy(),
                 # drop the leading batch dim (always 1 -- one physical robot),
                 # matching the documented (n_steps, D) embeddings.npz shape.
@@ -312,12 +304,6 @@ def _save_episode(
         frames = [entry["obs"][key] for entry in episode_data]
         _write_mp4(ep_dir / f"{key}.mp4", frames, fps=control_hz)
 
-    has_raw = episode_data and episode_data[0].get("raw_images")
-    raw_keys = [k for k in _CAMERA_KEYS if has_raw and k in episode_data[0]["raw_images"]]
-    for key in raw_keys:
-        frames = [entry["raw_images"][key] for entry in episode_data]
-        _write_mp4(ep_dir / f"{key}_full.mp4", frames, fps=control_hz)
-
     for layer in capture_layers:
         values = [
             entry["activations"][layer]
@@ -368,7 +354,6 @@ class _Args:
     device: str = "cuda:0"
     compile: bool = True
     capture_layers: tuple[str, ...] = ()
-    save_full_res: bool = True  # also write <camera_key>_full.mp4 at native camera resolution
     dry_run: bool = False
 
 
@@ -408,15 +393,8 @@ def main() -> None:
         inference = InferenceConfig(compile=args.compile, capture_layers=list(args.capture_layers))
         policy = LocalPolicy(args.ckpt, device=args.device, inference=inference)
 
-    shape_meta = _meta_from_policy(policy)["shape_meta"]
-    image_keys = [k for k, v in shape_meta["obs"].items() if v.get("type") == "rgb"]
-    image_hw = tuple(shape_meta["obs"][image_keys[0]]["shape"][:2]) if image_keys else None
-    env = DroidEnv(
-        action_space=args.action_space, control_hz=args.control_hz, image_hw=image_hw, dry_run=args.dry_run,
-    )
-    recording_env = RecordingEnv(
-        env, policy=policy if args.capture_layers else None, capture_raw=args.save_full_res,
-    )
+    env = DroidEnv(action_space=args.action_space, control_hz=args.control_hz, dry_run=args.dry_run)
+    recording_env = RecordingEnv(env, policy=policy if args.capture_layers else None)
 
     if InferenceMode(args.mode) == InferenceMode.ASYNC_STREAMING and args.capture_layers:
         log.warning(

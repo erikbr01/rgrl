@@ -129,7 +129,7 @@ def test_diffusion_policy_sample_timesteps_buffer(tiny_store):
     # the formula it replaced, and predict_action still works end to end.
     policy = DiffusionPolicy(
         tiny_store, obs_horizon=2, horizon=4, n_action_steps=2,
-        down_dims=(8, 16), num_kp=4, image_hw=None,
+        down_dims=(8, 16), num_kp=4, data_transforms=[],
         train_timesteps=20, inference_steps=5, sampler="ddim",
     )
     ratio = 20 // 5
@@ -165,7 +165,7 @@ def _rtc_policy_checks(policy):
 def test_diffusion_policy_rtc(tiny_store):
     policy = DiffusionPolicy(
         tiny_store, obs_horizon=2, horizon=8, n_action_steps=2,
-        down_dims=(8, 16), num_kp=4, image_hw=None,
+        down_dims=(8, 16), num_kp=4, data_transforms=[],
         train_timesteps=20, inference_steps=5, sampler="ddim",
     )
     for sampler in ("ddim", "ddpm"):
@@ -176,7 +176,7 @@ def test_diffusion_policy_rtc(tiny_store):
 def test_flow_policy_rtc(tiny_store):
     policy = FlowPolicy(
         tiny_store, obs_horizon=2, horizon=8, n_action_steps=2,
-        down_dims=(8, 16), num_kp=4, image_hw=None, inference_steps=5,
+        down_dims=(8, 16), num_kp=4, data_transforms=[], inference_steps=5,
     )
     _rtc_policy_checks(policy)
 
@@ -217,7 +217,7 @@ def _trained_rtc_checks(policy):
 def test_diffusion_policy_trained_rtc(tiny_store):
     policy = DiffusionPolicy(
         tiny_store, obs_horizon=2, horizon=8, n_action_steps=2,
-        down_dims=(8, 16), num_kp=4, image_hw=None,
+        down_dims=(8, 16), num_kp=4, data_transforms=[],
         train_timesteps=20, inference_steps=5, sampler="ddim",
         max_action_prefix=3,
     )
@@ -229,7 +229,7 @@ def test_diffusion_policy_trained_rtc(tiny_store):
 def test_flow_policy_trained_rtc(tiny_store):
     policy = FlowPolicy(
         tiny_store, obs_horizon=2, horizon=8, n_action_steps=2,
-        down_dims=(8, 16), num_kp=4, image_hw=None, inference_steps=5,
+        down_dims=(8, 16), num_kp=4, data_transforms=[], inference_steps=5,
         max_action_prefix=3,
     )
     _trained_rtc_checks(policy)
@@ -238,7 +238,7 @@ def test_flow_policy_trained_rtc(tiny_store):
 def test_dit_flow_policy_trained_rtc(tiny_store):
     policy = DiTFlowPolicy(
         tiny_store, obs_horizon=2, horizon=8, n_action_steps=2,
-        hidden_size=32, depth=2, num_heads=4, num_kp=4, image_hw=None,
+        hidden_size=32, depth=2, num_heads=4, num_kp=4, data_transforms=[],
         inference_steps=5, max_action_prefix=3,
     )
     _trained_rtc_checks(policy)
@@ -248,7 +248,7 @@ def test_dit_flow_policy_without_prefix_training(tiny_store):
     # max_action_prefix=0: plain flow matching + inpainting-fallback rtc
     policy = DiTFlowPolicy(
         tiny_store, obs_horizon=2, horizon=8, n_action_steps=2,
-        hidden_size=32, depth=2, num_heads=4, num_kp=4, image_hw=None,
+        hidden_size=32, depth=2, num_heads=4, num_kp=4, data_transforms=[],
         inference_steps=5, max_action_prefix=0,
     )
     batch = {"state": torch.randn(4, 2, 3), "action": torch.randn(4, 8, 2)}
@@ -265,7 +265,7 @@ def test_rtc_matches_plain_predict_shapes(tiny_store):
     # plain predict_action is untouched by the _sample refactor
     policy = DiffusionPolicy(
         tiny_store, obs_horizon=2, horizon=8, n_action_steps=2,
-        down_dims=(8, 16), num_kp=4, image_hw=None,
+        down_dims=(8, 16), num_kp=4, data_transforms=[],
         train_timesteps=20, inference_steps=5, sampler="ddim",
     )
     action = policy.predict_action({"state": torch.randn(3, 2, 3)})

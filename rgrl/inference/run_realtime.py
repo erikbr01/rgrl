@@ -98,12 +98,11 @@ def _build_policy(args: _Args):
 
 def _meta_from_policy(policy) -> dict:
     """Learn the checkpoint's obs_horizon/shape_meta/env_meta before the env
-    is built — HttpPolicy and LocalPolicy both expose the same fields, used
-    by both the robomimic branch (env_meta, action_dim, ...) and the droid
-    branch (image_hw, so DroidEnv resizes camera frames to what the
-    checkpoint trained on). WebSocketPolicy (openpi) has no /meta
-    equivalent and isn't routed here — see `main`'s `is_openpi` check — it
-    does its own image resize instead (image_tools.resize_with_pad)."""
+    is built — HttpPolicy and LocalPolicy both expose the same fields.
+    WebSocketPolicy has no /meta equivalent (openpi doesn't expose one) and
+    doesn't need one here: it's droid-only, and DroidEnv's construction
+    doesn't consume shape_meta/env_meta in the first place (see
+    _build_env) — only the robomimic branch calls this."""
     from rgrl.inference.policy_client import HttpPolicy, LocalPolicy
 
     if isinstance(policy, HttpPolicy):
@@ -128,17 +127,7 @@ def _build_env(args: _Args, meta: dict):
     if args.env == "droid":
         from rgrl.inference.droid_env import DroidEnv
 
-        image_hw = None
-        if meta is not None:
-            shape_meta = meta["shape_meta"]
-            image_keys = [k for k, v in shape_meta["obs"].items() if v.get("type") == "rgb"]
-            image_hw = tuple(shape_meta["obs"][image_keys[0]]["shape"][:2]) if image_keys else None
-        return DroidEnv(
-            action_space=args.action_space,
-            control_hz=args.control_hz,
-            image_hw=image_hw,
-            dry_run=args.dry_run,
-        )
+        return DroidEnv(action_space=args.action_space, control_hz=args.control_hz, dry_run=args.dry_run)
     if args.env == "robomimic":
         from rgrl.inference.robomimic_env import RobomimicSimEnv
 
@@ -170,10 +159,7 @@ def main() -> None:
         )
 
     policy = _build_policy(args)
-    # WebSocketPolicy (openpi) has no /meta equivalent and does its own
-    # image resize (image_tools.resize_with_pad) -- nothing to fetch here.
-    is_openpi = args.server is not None and args.server.startswith(("ws://", "wss://"))
-    meta = _meta_from_policy(policy) if not is_openpi else None
+    meta = _meta_from_policy(policy) if args.env == "robomimic" else None
     env = _build_env(args, meta)
 
     runner = Runner(

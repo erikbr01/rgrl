@@ -37,6 +37,7 @@ from rgrl.ema import EMA
 from rgrl.logutil import log_to_file
 from rgrl.profiler import SectionProfiler, chrome_trace
 from rgrl.store import EpisodeStore
+from rgrl.transforms import apply_pipeline
 
 log = logging.getLogger(__name__)
 
@@ -195,7 +196,7 @@ def _train(
     def one_step(step: int):
         nonlocal loss_sum
         with prof("data"):
-            batch = next(batches)
+            batch = apply_pipeline(policy.data_transforms_pipeline, next(batches))
         with prof("fwd"), autocast:
             loss = policy.compute_loss(batch)
         with prof("bwd"):
@@ -253,7 +254,7 @@ def _train(
             policy.eval()
             with torch.no_grad(), autocast:
                 vlosses = [
-                    policy.compute_loss(val.gather(ids))
+                    policy.compute_loss(apply_pipeline(policy.data_transforms_pipeline, val.gather(ids)))
                     for ids in torch.arange(val.num_samples).split(cfg.batch_size)
                 ]
             vloss = torch.stack(vlosses).mean().item()

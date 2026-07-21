@@ -14,7 +14,8 @@ cross-attention path dropped since there are no ViT tokens to attend to.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Callable
 
 import torch
 import torch.nn.functional as F
@@ -25,6 +26,7 @@ from rgrl.nets.dit import ActionDiT, TimestepEmbedder
 from rgrl.normalize import Normalizer
 from rgrl.policies.base import ObsEncoder
 from rgrl.store import EpisodeStore
+from rgrl.transforms import apply_pipeline, data_transforms_pipeline, default_transforms
 
 
 @dataclass
@@ -39,7 +41,8 @@ class DiTFlowConfig:
     num_heads: int = 8
     mlp_ratio: float = 4.0
     num_kp: int = 32
-    image_hw: tuple[int, int] | None = (76, 76)  # vision encoder's input size
+    # See DiffusionConfig.data_transforms -- same scheme.
+    data_transforms: list[Callable] = field(default_factory=default_transforms)
     inference_steps: int = 10
     # Train-time RTC (ABC's forward(): per-sample random prefix at
     # per-position t=0, loss masked to the postfix). Default 7 = the trained
@@ -57,7 +60,8 @@ class DiTFlowPolicy(nn.Module):
         super().__init__()
         self.cfg = DiTFlowConfig(**kwargs)
         cfg = self.cfg
-        self.enc = ObsEncoder(store, cfg.obs_horizon, cfg.image_hw, num_kp=cfg.num_kp)
+        self.data_transforms_pipeline, target_hw = data_transforms_pipeline(store, cfg.data_transforms)
+        self.enc = ObsEncoder(store, cfg.obs_horizon, target_hw, num_kp=cfg.num_kp)
         self.act_dim = store.meta.keys["action"].shape[0]
         self.action_norm = Normalizer(KeyNormalizer.from_dict(store.stats["action"]))
         self.obs_proj = nn.Linear(self.enc.out_dim, cfg.hidden_size)
@@ -115,6 +119,7 @@ class DiTFlowPolicy(nn.Module):
     @torch.no_grad()
     def predict_action(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
         cfg = self.cfg
+        batch = apply_pipeline(self.data_transforms_pipeline, batch)
         obs_vec = self.obs_proj(self.enc(batch))
         b = obs_vec.shape[0]
         x = torch.randn(b, cfg.horizon, self.act_dim, device=obs_vec.device, dtype=obs_vec.dtype)
@@ -150,6 +155,7 @@ class DiTFlowPolicy(nn.Module):
                 "distribution (lower open_loop_horizon or raise replan_step)"
             )
         trained = cfg.max_action_prefix > 0
+        batch = apply_pipeline(self.data_transforms_pipeline, batch)
         obs_vec = self.obs_proj(self.enc(batch))
         b = obs_vec.shape[0]
         device, dtype = obs_vec.device, obs_vec.dtype

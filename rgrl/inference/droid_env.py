@@ -1,13 +1,12 @@
 """Real-world DROID env behind the generic Env contract (rgrl/inference/runner.py).
 
 Wraps `droid.robot_env.RobotEnv` with:
-  - observation preprocessing (BGR/BGRA -> RGB, then resize to `image_hw` if
-    given, matching the DROID training data convention exactly --
-    robo_dataset.backends.droid.DroidStore's MP4 decode path does the
-    identical BGRA->RGB + cv2.resize(..., INTER_AREA)). Real ZED cameras
-    deliver native resolution by default; without this resize, the policy's
-    eval-time CenterCrop would just crop a small region out of a much bigger
-    frame instead of seeing the same whole-scene downsample it trained on.
+  - observation preprocessing (BGR/BGRA -> RGB, matching the DROID training
+    data convention -- robo_dataset.backends.droid.DroidStore's MP4 decode
+    path does the identical conversion). Resizing to the checkpoint's
+    trained shape is the policy's job (rgrl.policies.base.ObsEncoder), not
+    this env's -- it hands over raw camera frames at whatever resolution
+    the sensor delivers.
   - `dry_run` mode for smoke-testing the control loop without hardware
 
 Obs key names match robo_dataset's DroidStore / real trained checkpoints
@@ -33,13 +32,6 @@ import numpy as np
 _DROID_HINT = (
     "requires the DROID robot stack ('droid' package + ZED/Franka drivers), "
     "present on the robot workstation"
-)
-
-_IMAGE_KEYS = (
-    "wrist_image_left",
-    "wrist_image_right",
-    "exterior_image_1_left",
-    "exterior_image_2_left",
 )
 
 
@@ -70,7 +62,6 @@ class DroidEnv:
         wrist_serial: str = DEFAULT_WRIST_SERIAL,
         ext1_serial: str = DEFAULT_EXT1_SERIAL,
         ext2_serial: str = DEFAULT_EXT2_SERIAL,
-        image_hw: tuple[int, int] | None = None,
         dry_run: bool = False,
     ) -> None:
         if action_space not in ("joint_velocity", "cartesian_velocity", "joint_position"):
@@ -83,15 +74,6 @@ class DroidEnv:
         self.wrist_serial = wrist_serial
         self.ext1_serial = ext1_serial
         self.ext2_serial = ext2_serial
-        # Target (h, w) the checkpoint trained on -- e.g. a checkpoint's
-        # target shape_meta obs image shape. robo_dataset's DroidStore
-        # conversion resizes full camera frames down to this size (see
-        # backends/droid.py); real cameras deliver native ZED resolution
-        # (no resize at the driver level unless configured), so this env
-        # must resize to match or the policy's eval-time CenterCrop just
-        # crops a small region out of a much bigger frame -- a different,
-        # zoomed-in view than the whole-scene downsample it trained on.
-        self.image_hw = image_hw
         self.dry_run = dry_run
 
         # 7-DOF Franka: cartesian = 6+1=7, joint = 7+1=8.
@@ -99,7 +81,6 @@ class DroidEnv:
 
         self._robot_env = None
         self._last_obs: dict[str, np.ndarray] | None = None
-        self._last_raw_images: dict[str, np.ndarray] = {}
 
         if not dry_run:
             self._init_robot()
@@ -134,7 +115,6 @@ class DroidEnv:
     def reset(self) -> dict[str, np.ndarray]:
         if self.dry_run:
             obs = self._dummy_obs()
-            self._last_raw_images = {k: v for k, v in obs.items() if k in _IMAGE_KEYS}
         else:
             self._robot_env.reset()
             obs = self._get_obs()
@@ -152,7 +132,6 @@ class DroidEnv:
         action = actions[0]
         if self.dry_run:
             obs = self._dummy_obs()
-            self._last_raw_images = {k: v for k, v in obs.items() if k in _IMAGE_KEYS}
         else:
             robot_action = self._to_robot_action(action, self._last_obs or {})
             self._robot_env.update_robot(
@@ -215,7 +194,6 @@ class DroidEnv:
             ),
             "cartesian_position": np.array(robot_state.get("cartesian_position", np.zeros(6)), dtype=np.float32),
         }
-        raw_images: dict[str, np.ndarray] = {}
         for serial, key, view in (
             (self.wrist_serial, "wrist_image_left", "left"),
             (self.wrist_serial, "wrist_image_right", "right"),
@@ -224,42 +202,27 @@ class DroidEnv:
         ):
             img = image_obs.get(f"{serial}_{view}")
             if img is not None:
-                img = self._to_rgb(img)
-                raw_images[key] = img
-                obs[key] = self._resize_to_policy_input(img)
-        self._last_raw_images = raw_images
+                obs[key] = self._preprocess_image(img)
         return obs
 
     @staticmethod
-    def _to_rgb(img: np.ndarray) -> np.ndarray:
+    def _preprocess_image(img: np.ndarray) -> np.ndarray:
+        # Only convert colour space — resizing to the checkpoint's trained
+        # shape is the policy's job (rgrl.policies.base.ObsEncoder).
         if img.ndim == 3 and img.shape[2] == 4:
-            return cv2.cvtColor(img, cv2.COLOR_BGRA2RGB)
-        if img.ndim == 3 and img.shape[2] == 3:
-            return img[..., ::-1].copy()  # BGR -> RGB
+            img = cv2.cvtColor(img, cv2.COLOR_BGRA2RGB)
+        elif img.ndim == 3 and img.shape[2] == 3:
+            img = img[..., ::-1].copy()  # BGR -> RGB
         return img
-
-    def _resize_to_policy_input(self, img: np.ndarray) -> np.ndarray:
-        if self.image_hw is not None and img.shape[:2] != tuple(self.image_hw):
-            h, w = self.image_hw
-            return cv2.resize(img, (w, h), interpolation=cv2.INTER_AREA)
-        return img
-
-    def get_raw_images(self) -> dict[str, np.ndarray]:
-        """Last step's camera frames at native (un-resized) resolution --
-        RGB-converted only. For recording: nicer to share than the
-        policy-input frames, which are downsized to the checkpoint's
-        trained shape."""
-        return dict(self._last_raw_images)
 
     def _dummy_obs(self) -> dict[str, np.ndarray]:
         rng = np.random.default_rng()
-        h, w = self.image_hw if self.image_hw is not None else (180, 320)
         return {
             "joint_positions": rng.random(7).astype(np.float32),
             "gripper_position": rng.random(1).astype(np.float32),
             "cartesian_position": rng.random(6).astype(np.float32),
-            "wrist_image_left": rng.integers(0, 255, (h, w, 3), dtype=np.uint8),
-            "wrist_image_right": rng.integers(0, 255, (h, w, 3), dtype=np.uint8),
-            "exterior_image_1_left": rng.integers(0, 255, (h, w, 3), dtype=np.uint8),
-            "exterior_image_2_left": rng.integers(0, 255, (h, w, 3), dtype=np.uint8),
+            "wrist_image_left": rng.integers(0, 255, (180, 320, 3), dtype=np.uint8),
+            "wrist_image_right": rng.integers(0, 255, (180, 320, 3), dtype=np.uint8),
+            "exterior_image_1_left": rng.integers(0, 255, (180, 320, 3), dtype=np.uint8),
+            "exterior_image_2_left": rng.integers(0, 255, (180, 320, 3), dtype=np.uint8),
         }
