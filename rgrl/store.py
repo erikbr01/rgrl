@@ -155,7 +155,7 @@ class EpisodeStore:
             quat_convention=quat_convention,
         )
 
-    def load(self, key: str) -> np.ndarray:
+    def load(self, key: str, episode_range: tuple[int, int] | None = None) -> np.ndarray:
         # Per-episode get_frames() calls, fanned out across threads, instead
         # of one sequential get_sequence() over the whole store: for a
         # video-backed store this is the difference between decoding on one
@@ -163,16 +163,24 @@ class EpisodeStore:
         # cache is documented thread-safe for exactly this). Cheap for
         # non-video backends too — a thread pool over near-free zarr reads
         # costs nothing.
-        n_eps = self.meta.num_episodes
-        if n_eps <= 1:
-            return np.ascontiguousarray(self._robo.get_sequence(key, 0, self.meta.num_frames))
+        #
+        # episode_range: [lo, hi) episode indices to load, default the whole
+        # store — GpuSequenceDataset uses this so a train/val split loads
+        # only its own episodes' frames, not a full duplicate copy of the
+        # other split's (see its docstring).
+        lo, hi = (0, self.meta.num_episodes) if episode_range is None else episode_range
+        if hi - lo <= 1:
+            ends = self.meta.episode_ends
+            start = 0 if lo == 0 else ends[lo - 1]
+            end = start if hi <= lo else ends[lo]
+            return np.ascontiguousarray(self._robo.get_sequence(key, start, end))
         ends = self.meta.episode_ends
         starts = [0] + ends[:-1]
-        with ThreadPoolExecutor(max_workers=min(16, n_eps)) as pool:
+        with ThreadPoolExecutor(max_workers=min(16, hi - lo)) as pool:
             parts = list(
                 pool.map(
                     lambda i: self._robo.get_frames(i, key, 0, ends[i] - starts[i]),
-                    range(n_eps),
+                    range(lo, hi),
                 )
             )
         return np.ascontiguousarray(np.concatenate(parts, axis=0))
@@ -183,8 +191,12 @@ class EpisodeStore:
         starts = np.concatenate([[0], ends[:-1]])
         return np.stack([starts, ends], axis=1)
 
-    def nbytes(self) -> int:
-        n = self.meta.num_frames
+    def nbytes(self, n_frames: int | None = None) -> int:
+        """Total bytes across every key for `n_frames` frames (default: the
+        whole store) — GpuSequenceDataset passes just its split's frame
+        count so the GPU-resident decision reflects what that instance
+        actually loads, not the whole store."""
+        n = self.meta.num_frames if n_frames is None else n_frames
         return sum(
             n * int(np.prod(s.shape)) * np.dtype(s.dtype).itemsize for s in self.meta.keys.values()
         )

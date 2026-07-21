@@ -44,11 +44,23 @@ class GpuSequenceDataset:
     ):
         self.windows = windows
         self.device = device
-        bounds = store.episode_bounds()
+        n_eps = store.meta.num_episodes
         if val_episodes:
             # deterministic split: last N episodes are validation
-            bounds = bounds[:-val_episodes] if val_split == "train" else bounds[-val_episodes:]
-        self.bounds = bounds
+            ep_lo, ep_hi = (
+                (0, n_eps - val_episodes) if val_split == "train" else (n_eps - val_episodes, n_eps)
+            )
+        else:
+            ep_lo, ep_hi = 0, n_eps
+        bounds = store.episode_bounds()[ep_lo:ep_hi]
+        # Split-local frame offset: train's bounds already start at 0, but
+        # val's start wherever the last val_episodes begin in the full
+        # store. Loading only this split's frames (below) means the tensor
+        # itself starts at local index 0 too, so the window table has to be
+        # shifted the same amount — otherwise a val instance would index
+        # past the end of its own (much smaller) tensors.
+        frame_offset = int(bounds[0][0]) if len(bounds) else 0
+        self.bounds = bounds - frame_offset
         self.image_keys = [k for k, s in store.meta.keys.items() if s.kind == KIND_IMAGE]
         self.state_keys = [
             k for k, s in store.meta.keys.items() if s.kind == "state"
@@ -56,13 +68,18 @@ class GpuSequenceDataset:
 
         # Device placement: everything on GPU if it fits, else pinned CPU.
         # gpu_resident drives the gather path — never compare torch.device
-        # objects directly ("cuda" != "cuda:0").
-        gb = store.nbytes() / 1e9
+        # objects directly ("cuda" != "cuda:0"). Sized to this split's own
+        # frame count -- train and val must not each independently decide
+        # "the whole store fits" and then both load a full copy: together
+        # they'd cost 2x the store's memory for no reason, since every
+        # frame lives in exactly one of the two splits.
+        n_frames_split = int(bounds[-1][1] - frame_offset) if len(bounds) else 0
+        gb = store.nbytes(n_frames_split) / 1e9
         self.gpu_resident = device.type == "cuda" and gb < pin_fallback_gb
         self.data_device = device if self.gpu_resident else torch.device("cpu")
         self.tensors: dict[str, torch.Tensor] = {}
         for key in store.meta.keys:
-            t = torch.from_numpy(store.load(key))
+            t = torch.from_numpy(store.load(key, episode_range=(ep_lo, ep_hi)))
             if self.gpu_resident:
                 t = t.to(device)
             elif torch.cuda.is_available():

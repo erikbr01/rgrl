@@ -72,6 +72,40 @@ def test_gather_matches_direct_indexing(tiny_store):
     assert torch.equal(batch["state"][1], raw[ds.obs_idx[8]])
 
 
+def test_val_split_loads_only_its_own_episodes_not_a_full_store_copy(tiny_store):
+    """Regression test: train and val must each load only their own split's
+    frames, not a full duplicate copy of the store -- previously
+    GpuSequenceDataset.__init__ called store.load(key) unconditionally
+    (every episode, regardless of split), so a train+val pair together
+    loaded the whole store onto the device TWICE. With 1 val episode out
+    of 3 (lengths 7, 5, 9 -> 21 total frames), train should hold 12 frames
+    and val should hold 9 -- 21 total, not 42."""
+    train = GpuSequenceDataset(
+        tiny_store, Windows(2, 4), torch.device("cpu"), val_episodes=1, val_split="train"
+    )
+    val = GpuSequenceDataset(
+        tiny_store, Windows(2, 4), torch.device("cpu"), val_episodes=1, val_split="val"
+    )
+    assert train.tensors["state"].shape[0] == 7 + 5
+    assert val.tensors["state"].shape[0] == 9
+    assert train.num_samples == 7 + 5
+    assert val.num_samples == 9
+
+    # val's data must be episode 2's (the last episode) actual frames, not
+    # episode 0's or garbage from a wrong offset -- get it independently
+    # from the store and compare.
+    expected = tiny_store.load("state", episode_range=(2, 3))
+    np.testing.assert_array_equal(val.tensors["state"].numpy(), expected)
+
+    # val's windowing must be entirely local (0-based), never referencing
+    # frames outside its own 9-frame tensor -- a stale absolute offset
+    # would index past the end (or into the wrong data) instead of raising.
+    assert val.obs_idx.max().item() < 9
+    assert val.act_idx.max().item() < 9
+    batch = val.gather(torch.tensor([0]))
+    np.testing.assert_array_equal(batch["state"][0, -1].numpy(), expected[0])
+
+
 def test_epoch_perm_reproducible(tiny_store):
     ds = GpuSequenceDataset(tiny_store, Windows(2, 4), torch.device("cpu"))
     assert torch.equal(ds.epoch_perm(1, 5), ds.epoch_perm(1, 5))

@@ -10,6 +10,7 @@ val_episodes: 4
 val_every: 2000
 log_every: 100
 save_every: 10000
+pin_fallback_gb: 20.0
 compile: true
 bf16: true
 ema_power: 0.75

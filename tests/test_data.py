@@ -107,3 +107,99 @@ def test_incomplete_cache_raises_without_deleting(synthetic_hdf5, tmp_path):
     with pytest.raises(RuntimeError, match="missing"):
         load_store(source_cfg, target_meta, cache_root=cache_root)
     assert not stats_path.exists()  # not silently regenerated
+
+
+@pytest.fixture
+def video_store_path(tmp_path):
+    """A small robo_dataset VideoStore (4 episodes, one image key, one
+    lowdim key, actions) -- exercises the store_path (episode_ids
+    subsetting) source kind, unlike synthetic_hdf5's `path` source kind."""
+    pytest.importorskip("av", reason="PyAV needed to build a VideoStore fixture (rgrl's `video` extra)")
+    from robo_dataset.backends.video import VideoStoreWriter
+
+    path = tmp_path / "source_store"
+    ep_lengths = [5, 4, 6, 3]
+    rng = np.random.default_rng(0)
+    writer = VideoStoreWriter.create(
+        str(path),
+        key_shapes={"state": (3,), "cam": (8, 8, 3), "action": (2,)},
+        key_dtypes={"state": np.float32, "cam": np.uint8, "action": np.float32},
+        n_episodes=len(ep_lengths),
+        image_keys=["cam"],
+    )
+    for ep_idx, t in enumerate(ep_lengths):
+        writer.put_episode(
+            ep_idx,
+            {
+                "state": rng.normal(size=(t, 3)).astype(np.float32),
+                "cam": rng.integers(0, 255, size=(t, 8, 8, 3), dtype=np.uint8),
+                "action": rng.normal(size=(t, 2)).astype(np.float32),
+            },
+        )
+    writer.finalize()
+    return str(path)
+
+
+def _store_source_cfg(store_path: str, episode_ids=None) -> dict:
+    cfg = {
+        "name": "synth_store",
+        "store_path": store_path,
+        "abs_action": False,
+        "rename": {},
+        "shape_meta": {
+            "obs": {
+                "state": {"shape": [3], "type": "low_dim"},
+                "cam": {"shape": [8, 8, 3], "type": "rgb", "channel_order": "rgb"},
+            },
+            "action": {"shape": [2]},
+        },
+    }
+    if episode_ids is not None:
+        cfg["episode_ids"] = episode_ids
+    return cfg
+
+
+def test_load_store_from_store_path_whole_store_unchanged(video_store_path, tmp_path):
+    """No episode_ids: existing symlink-the-whole-store behavior."""
+    source_cfg = _store_source_cfg(video_store_path)
+    store = load_store(source_cfg, source_cfg["shape_meta"], cache_root=tmp_path / "cache")
+    assert store.meta.num_episodes == 4
+    assert store.meta.num_frames == 5 + 4 + 6 + 3
+
+
+def test_episode_ids_selects_and_reindexes_a_reproducible_subset(video_store_path, tmp_path):
+    """episode_ids keeps exactly the given source episodes, in that order,
+    renumbered from 0 -- both a correctness check (right frames end up in
+    the right place) and a reproducibility check (stats reflect only the
+    subset, not the whole source store)."""
+    from robo_dataset.store_factory import open_store
+
+    src = open_store(video_store_path)
+    episode_ids = [2, 0]  # subset, deliberately out of order and skipping episodes 1, 3
+    source_cfg = _store_source_cfg(video_store_path, episode_ids=episode_ids)
+
+    store = load_store(source_cfg, source_cfg["shape_meta"], cache_root=tmp_path / "cache")
+    assert store.meta.num_episodes == len(episode_ids)
+    assert store.meta.num_frames == sum(src.episode_length(i) for i in episode_ids)
+
+    # dst episode 0 must be src episode 2's data (order preserved, not sorted)
+    src_ep0_len = src.episode_length(2)
+    np.testing.assert_allclose(
+        store.load("state")[:src_ep0_len], src.get_frames(2, "state", 0, src_ep0_len)
+    )
+
+    # stats computed over just the 2-episode subset, not all 4 source episodes
+    subset_frames = sum(src.episode_length(i) for i in episode_ids)
+    all_frames = int(src.episode_ends[-1])
+    assert subset_frames < all_frames  # sanity: the subset really is smaller
+    subset_state = np.concatenate(
+        [src.get_frames(i, "state", 0, src.episode_length(i)) for i in episode_ids]
+    )
+    stats = json.loads((store.path / "stats.json").read_text())
+    np.testing.assert_allclose(stats["state"]["stats"]["min"], subset_state.min(axis=0), rtol=1e-5)
+
+
+def test_episode_ids_out_of_range_raises(video_store_path, tmp_path):
+    source_cfg = _store_source_cfg(video_store_path, episode_ids=[0, 99])
+    with pytest.raises(ValueError, match="out of range"):
+        load_store(source_cfg, source_cfg["shape_meta"], cache_root=tmp_path / "cache")
