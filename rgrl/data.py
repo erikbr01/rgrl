@@ -175,6 +175,13 @@ def _convert(source_cfg: dict, target_shape_meta: dict, out: Path) -> None:
 
     with h5py.File(source_cfg["path"], "r") as f:
         env_meta = json.loads(f["data"].attrs["env_args"]) if "env_args" in f["data"].attrs else {}
+    # A dataset's own env_args can be recorded against a newer robosuite than
+    # the one installed here (e.g. lite_physics / nested "BASIC" controller
+    # configs from robosuite>=1.5, unsupported by the 1.4.1 pin this repo
+    # needs for OSC controller/mujoco compatibility elsewhere) -- let the data
+    # config override individual env_meta keys (e.g. env_kwargs) rather than
+    # forcing every hdf5 to already match the installed robosuite's schema.
+    env_meta = {**env_meta, **source_cfg.get("env_meta", {})}
     env_meta["abs_action"] = source_cfg.get("abs_action", False)
 
     write_sidecars(
