@@ -92,12 +92,14 @@ class _ConfigStore:
     load_state_dict overwrites them immediately after).
 
     env_meta (e.g. robosuite's simulator kwargs) is a fact about the real
-    recorded data, not the schema, so it's unavailable here (empty) -- fine
-    for real-robot inference, which doesn't consume it; a robomimic sim
-    rollout needs the real EpisodeStore instead.
+    recorded data, not the schema -- but rgrl/train_loop.py saves it into
+    the checkpoint's own config (as `store.meta.env_meta` at train time), so
+    it's passed in here rather than reconstructed. That keeps a checkpoint
+    fully self-contained for a robomimic sim rollout too: no reopening the
+    original dataset at eval time.
     """
 
-    def __init__(self, target_shape_meta: dict):
+    def __init__(self, target_shape_meta: dict, env_meta: dict | None = None):
         keys: dict[str, KeySpec] = {}
         for key, spec in target_shape_meta["obs"].items():
             kind = KIND_IMAGE if spec.get("type", "low_dim") == "rgb" else KIND_STATE
@@ -111,7 +113,7 @@ class _ConfigStore:
         keys["action"] = KeySpec(
             shape=list(target_shape_meta["action"]["shape"]), dtype="float32", kind=KIND_ACTION
         )
-        self.meta = StoreMeta(episode_ends=[], keys=keys, env_meta={})
+        self.meta = StoreMeta(episode_ends=[], keys=keys, env_meta=env_meta or {})
         self.stats = {
             k: {
                 "method": "none",
@@ -146,7 +148,7 @@ def load_policy(
 
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     tc = ckpt["config"]
-    store = _ConfigStore(tc["target"])
+    store = _ConfigStore(tc["target"], tc.get("env_meta"))
     policy_cfg = dict(tc["policy"])  # the resolved config that built it at train time — _target_ and all
     if inference.sampler is not None:
         policy_cfg["sampler"] = inference.sampler

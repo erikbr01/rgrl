@@ -167,6 +167,12 @@ def _train(
             "store": store_cfg,
             "target": target_cfg,
             "policy": policy_cfg,
+            # a fact about the training data (e.g. robosuite's env_name/
+            # env_kwargs), not the policy's schema -- saved here so a
+            # checkpoint is enough on its own for a robomimic sim rollout,
+            # with no need to reopen the original dataset at eval time (see
+            # rgrl.inference.checkpoint._ConfigStore).
+            "env_meta": store.meta.env_meta,
         }
 
     (out / "config.json").write_text(json.dumps(full_config(), default=str, indent=1))
