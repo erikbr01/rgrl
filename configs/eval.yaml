@@ -1,6 +1,7 @@
 defaults:
   - inference: diffusion
   - env: robomimic_lift
+  - rollout_env: robomimic
   - override hydra/job_logging: none
   - override hydra/hydra_logging: none
   - _self_

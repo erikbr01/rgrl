@@ -1,0 +1,33 @@
+defaults:
+  - inference: diffusion
+  - rollout_env: robomimic
+  - override hydra/job_logging: none
+  - override hydra/hydra_logging: none
+  - _self_
+
+hydra:
+  job:
+    chdir: false
+  output_subdir: null
+  run:
+    dir: .
+
+ckpt: null  # in-process checkpoint (mutually exclusive with server)
+server: null  # http(s)://host:port (rgrl policy_server) or ws(s)://host:port (openpi); unset + no ckpt -> default local policy_server
+mode: sync  # sync | async_chunk | async_streaming
+instruction: ""  # language prompt -- openpi/pi0 (server ws://...) only
+episodes: 5
+max_timesteps: 1000
+control_hz: 15.0
+open_loop_horizon: 8
+replan_step: 0  # async_chunk only
+rtc: false  # async_chunk only -- real-time chunking, see rgrl/inference/runner.py
+policy_hz: null  # async_streaming only
+min_commit_steps: 0  # async_streaming only
+num_envs: 1  # robomimic only -- >1 for several real-time-paced envs at once
+device: cuda:0  # --ckpt only
+capture_layers: []  # --ckpt only -- see rgrl/inference/activations.py
+# openpi (server ws://...) only -- camera key mapping, see WebSocketPolicy
+external_camera: ext1
+wrist_key: wrist_image_left
+ext_key: null

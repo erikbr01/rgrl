@@ -322,7 +322,7 @@ class WebSocketPolicy(_FuturePolicy):
     — one physical robot) directly, matching the wire format
     openpi_client.websocket_client_policy.WebsocketClientPolicy expects.
 
-    State/camera key names default to rgrl.inference.droid_env.DroidEnv's
+    State/camera key names default to rgrl.inference.envs.droid.DroidEnv's
     native obs keys (joint_positions, gripper_position, wrist_image_left,
     exterior_image_1_left/2_left) so no key-remapping is needed when pairing
     this with DroidEnv, same as HttpPolicy.
