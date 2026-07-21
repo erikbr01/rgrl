@@ -44,7 +44,7 @@ class _Args:
     mode: str = "sync"  # sync | async_chunk | async_streaming
     instruction: str = ""  # language prompt -- openpi/pi0 (--server ws://...) only
     episodes: int = 5
-    max_timesteps: int = 400
+    max_timesteps: int = 1000
     control_hz: float = 15.0
     open_loop_horizon: int = 8
     replan_step: int = 0  # async_chunk only

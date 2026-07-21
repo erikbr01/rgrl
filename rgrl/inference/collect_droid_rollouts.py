@@ -360,7 +360,7 @@ class _Args:
     rtc: bool = False
     policy_hz: float | None = None
     min_commit_steps: int = 0
-    max_timesteps: int = 600
+    max_timesteps: int = 1000
     control_hz: float = 15.0
     action_space: str = "joint_velocity"
     position_gain: float = 1.0
