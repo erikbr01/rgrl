@@ -32,7 +32,7 @@ from pathlib import Path
 import torch
 from torch import nn
 
-from rgrl.dataset import GpuSequenceDataset, Windows
+from rgrl.dataset import Windows, build_dataset
 from rgrl.ema import EMA
 from rgrl.logutil import log_to_file
 from rgrl.profiler import SectionProfiler, chrome_trace
@@ -58,14 +58,20 @@ class TrainConfig:
     val_every: int = 2_000
     log_every: int = 100
     save_every: int = 10_000
-    # GpuSequenceDataset falls back to pinned-CPU-resident data (slower
-    # transfer, but frees VRAM for the model) once a split's own frames
-    # exceed this -- see rgrl/dataset.py. The default (20GB) assumes a
-    # data-hungry-but-small-model recipe; large models (e.g. DiT depth=8+)
-    # need more headroom than that leaves, so lower this explicitly rather
-    # than shrinking batch_size just to fit a store that happens to be
-    # small enough to stay GPU-resident by default.
+    # build_dataset() falls back to a CpuSequenceDataset (real DataLoader,
+    # CPU-resident) once a split's own frames exceed this -- see
+    # rgrl/dataset.py. The default (20GB) assumes a data-hungry-but-
+    # small-model recipe; large models (e.g. DiT depth=8+) need more
+    # headroom than that leaves, so lower this explicitly rather than
+    # shrinking batch_size just to fit a store that happens to be small
+    # enough to stay GPU-resident by default.
     pin_fallback_gb: float = 20.0
+    # Once pin_fallback_gb triggers, the resulting CpuSequenceDataset is
+    # always driven by a real DataLoader -- this just sets its worker
+    # count. 0 (default) is still correct and safe (single-process,
+    # synchronous fetch via the same Dataset), just without the
+    # cross-process gather parallelism a positive count buys.
+    dataloader_workers: int = 0
 
     compile: bool = True
     bf16: bool = True
@@ -112,12 +118,14 @@ def _train(
     torch.backends.cudnn.benchmark = True
 
     windows = Windows(obs_horizon=policy.cfg.obs_horizon, horizon=policy.cfg.horizon)
-    data = GpuSequenceDataset(
-        store, windows, device, cfg.val_episodes, "train", pin_fallback_gb=cfg.pin_fallback_gb
+    data = build_dataset(
+        store, windows, device, cfg.val_episodes, "train",
+        pin_fallback_gb=cfg.pin_fallback_gb, dataloader_workers=cfg.dataloader_workers,
     )
     val = (
-        GpuSequenceDataset(
-            store, windows, device, cfg.val_episodes, "val", pin_fallback_gb=cfg.pin_fallback_gb
+        build_dataset(
+            store, windows, device, cfg.val_episodes, "val",
+            pin_fallback_gb=cfg.pin_fallback_gb, dataloader_workers=cfg.dataloader_workers,
         )
         if cfg.val_episodes
         else None

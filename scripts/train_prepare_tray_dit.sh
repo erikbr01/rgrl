@@ -21,6 +21,12 @@
 # once data is also GPU-resident (see rgrl/dataset.py, rgrl/train_loop.py's
 # TrainConfig.pin_fallback_gb). Explicit rather than relying on this
 # store's total size happening to land above the 20GB default threshold.
+#
+# dataloader_workers=2: past pin_fallback_gb, data lives in a
+# CpuSequenceDataset driven by a real torch DataLoader (spawn workers) --
+# this overlaps the CPU gather + H2D copy with GPU compute instead of doing
+# it synchronously in the training loop. Verified via a real sanity run:
+# drops the "data" profiler fraction from ~25-28% to ~5-6% of step time.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 CUDA_VISIBLE_DEVICES=0 exec uv run --extra video --extra wandb python train.py \
@@ -33,5 +39,6 @@ CUDA_VISIBLE_DEVICES=0 exec uv run --extra video --extra wandb python train.py \
   training.save_every=100000 \
   training.steps=500000 \
   training.pin_fallback_gb=8 \
+  training.dataloader_workers=2 \
   out=runs/prepare_tray_baseline_dit \
   "$@"

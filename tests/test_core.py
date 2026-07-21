@@ -8,7 +8,7 @@ from robo_dataset.backends.zarr_backend import ZarrStoreWriter
 from robo_dataset.normalization import fit_key
 from robo_dataset.transforms.gpu_batch import CenterCrop, RandomCrop
 
-from rgrl.dataset import GpuSequenceDataset, Windows
+from rgrl.dataset import CpuSequenceDataset, GpuSequenceDataset, Windows, build_dataset
 from rgrl.nets.unet1d import ConditionalUnet1D
 from rgrl.normalize import Normalizer
 from rgrl.policies.diffusion import DiffusionPolicy
@@ -104,6 +104,74 @@ def test_val_split_loads_only_its_own_episodes_not_a_full_store_copy(tiny_store)
     assert val.act_idx.max().item() < 9
     batch = val.gather(torch.tensor([0]))
     np.testing.assert_array_equal(batch["state"][0, -1].numpy(), expected[0])
+
+
+def test_cpu_sequence_dataset_batches_and_gather_are_structurally_correct(tiny_store):
+    """CpuSequenceDataset (real DataLoader, spawn worker processes) must
+    produce the same shapes/dtypes/keys GpuSequenceDataset does for the
+    same store -- not bit-identical sampling (DataLoader's own shuffle
+    replaces the custom epoch_perm scheme for this mode, intentionally),
+    just structurally correct, and it must actually complete several
+    batches through real worker processes without hanging."""
+    windows = Windows(2, 4)
+    gpu_ds = GpuSequenceDataset(tiny_store, windows, torch.device("cpu"))
+    cpu_ds = CpuSequenceDataset(tiny_store, windows, torch.device("cpu"), num_workers=2)
+    assert cpu_ds.num_samples == gpu_ds.num_samples == 7 + 5 + 9
+
+    batches = cpu_ds.batches(batch_size=4, seed=0)
+    for _ in range(3):  # several batches -- exercises the persistent worker pool repeatedly
+        batch = next(batches)
+        assert set(batch.keys()) == {"state", "action", "action_is_pad"}
+        assert batch["state"].shape == (4, 2, 3)
+        assert batch["action"].shape == (4, 4, 2)
+        assert batch["action_is_pad"].shape == (4, 4)
+        assert batch["state"].dtype == torch.float32
+        assert batch["action_is_pad"].dtype == torch.bool
+
+    # gather() (the val-evaluation path) covers arbitrary explicit sample_ids
+    # directly, no DataLoader involved.
+    gathered = cpu_ds.gather(torch.tensor([0, 8, 20]))
+    assert gathered["state"].shape == (3, 2, 3)
+    assert gathered["action"].shape == (3, 4, 2)
+    np.testing.assert_array_equal(gathered["state"].numpy(), gpu_ds.gather(torch.tensor([0, 8, 20]))["state"].numpy())
+
+
+def test_build_dataset_stays_gpu_resident_on_cpu_device_regardless_of_threshold(tiny_store):
+    """pin_fallback_gb only ever matters for a CUDA target -- CPU-target
+    training has no VRAM to run out of, so build_dataset must always
+    return the plain GpuSequenceDataset there, even with a threshold of 0."""
+    ds = build_dataset(tiny_store, Windows(2, 4), torch.device("cpu"), pin_fallback_gb=0.0, dataloader_workers=4)
+    assert isinstance(ds, GpuSequenceDataset)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+def test_build_dataset_picks_cpu_dataset_past_the_gb_threshold_on_cuda():
+    """The actual dispatch condition build_dataset exists for: a CUDA
+    target whose split exceeds pin_fallback_gb gets CpuSequenceDataset
+    (dataloader_workers=0 or not -- the threshold alone decides the mode,
+    see build_dataset's docstring); comfortably under it stays
+    GpuSequenceDataset."""
+    import tempfile
+
+    from robo_dataset.backends.zarr_backend import ZarrStoreWriter
+
+    rng = np.random.default_rng(0)
+    with tempfile.TemporaryDirectory() as tmp:
+        key_shapes = {"state": (3,), "action": (2,)}
+        key_dtypes = {"state": np.float32, "action": np.float32}
+        w = ZarrStoreWriter.create(f"{tmp}/store", key_shapes=key_shapes, key_dtypes=key_dtypes)
+        ep = {"state": rng.normal(size=(5, 3)).astype(np.float32), "action": rng.normal(size=(5, 2)).astype(np.float32)}
+        w.put_episode(ep)
+        w.finalize()
+        write_sidecars(f"{tmp}/store", stats_keys={k: ep[k] for k in key_shapes}, source="test")
+        shape_meta = {"obs": {"state": {"shape": [3], "type": "low_dim"}}, "action": {"shape": [2]}}
+        store = EpisodeStore(f"{tmp}/store", shape_meta)
+
+        device = torch.device("cuda")
+        under = build_dataset(store, Windows(2, 4), device, pin_fallback_gb=1e6, dataloader_workers=0)
+        over = build_dataset(store, Windows(2, 4), device, pin_fallback_gb=0.0, dataloader_workers=0)
+        assert isinstance(under, GpuSequenceDataset)
+        assert isinstance(over, CpuSequenceDataset)
 
 
 def test_epoch_perm_reproducible(tiny_store):
