@@ -365,10 +365,15 @@ def main(cfg: DictConfig) -> None:
     recordings = output_dir / "recordings"
     recordings.mkdir(parents=True, exist_ok=True)
 
-    inference = instantiate(cfg.inference)
-    inference = dataclasses.replace(
-        inference, warmup_batch_size=cfg.num_envs, capture_layers=list(cfg.capture_layers)
-    )
+    inference = None
+    if cfg.server is None and cfg.ckpt is not None:
+        # LocalPolicy path only -- see rollout_cli.build_policy docstring. Instantiating
+        # unconditionally drags torch (rgrl.eval_robomimic imports it) into the HttpPolicy
+        # path too, which breaks running this on a torch-free robot workstation.
+        inference = instantiate(cfg.inference)
+        inference = dataclasses.replace(
+            inference, warmup_batch_size=cfg.num_envs, capture_layers=list(cfg.capture_layers)
+        )
     policy = build_policy(ckpt=cfg.ckpt, server=cfg.server, inference=inference, device=cfg.device)
     build_env = instantiate(cfg.rollout_env)
     env = build_env(policy, num_envs=cfg.num_envs, control_hz=cfg.control_hz)

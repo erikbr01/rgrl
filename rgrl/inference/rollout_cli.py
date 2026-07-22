@@ -54,12 +54,15 @@ def meta_from_policy(policy) -> dict:
     regardless of backend: HttpPolicy's /meta, or LocalPolicy's in-process
     store/cfg. WebSocketPolicy (openpi) has no equivalent -- it's droid-only,
     and DroidEnv's build() doesn't consume this in the first place."""
-    from rgrl.inference.checkpoint import shape_meta_json
     from rgrl.inference.policy_client import HttpPolicy, LocalPolicy
 
     if isinstance(policy, HttpPolicy):
         return policy.ensure_meta()
     if isinstance(policy, LocalPolicy):
+        # deferred: checkpoint.py imports torch, only needed on this in-process path --
+        # HttpPolicy clients (e.g. a torch-free robot workstation) never hit it
+        from rgrl.inference.checkpoint import shape_meta_json
+
         store = policy.store
         return {
             "obs_horizon": policy.policy.cfg.obs_horizon,
