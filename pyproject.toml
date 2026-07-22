@@ -50,16 +50,17 @@ packages = ["rgrl"]
 # robosuite 1.4.1 (needed for robomimic v0.3-era datasets) has old metadata.
 # Keep the core env resolvable without the eval extra.
 
-# cu126 wheels: newest CUDA that runs on this machine's 555 driver (CUDA 12.5;
-# 12.x wheels are minor-version compatible with driver >= 525).
+# cu128 wheels: this machine has an RTX 5090 (Blackwell, sm_120), which cu126
+# doesn't ship kernels for. cu128 is the oldest CUDA 12.x index with Blackwell
+# support and runs fine under this machine's 580 driver.
 [tool.uv.sources]
-torch = [{ index = "pytorch-cu126" }]
-torchvision = [{ index = "pytorch-cu126" }]
+torch = [{ index = "pytorch-cu128" }]
+torchvision = [{ index = "pytorch-cu128" }]
 # vendored as a git submodule (third_party/robo_dataset), not copied in — stays
 # a standalone repo at github.com:erikbr01/robo_dataset
 robo_dataset = { path = "third_party/robo_dataset", editable = true }
 
 [[tool.uv.index]]
-name = "pytorch-cu126"
-url = "https://download.pytorch.org/whl/cu126"
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
 explicit = true
