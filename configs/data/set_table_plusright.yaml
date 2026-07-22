@@ -1,0 +1,34 @@
+name: set_table_plusright
+# PENDING: same rebuild as configs/data/set_table_baseline.yaml. This
+# split adds 60 more "prepare plate - milk right" episodes (disjoint from
+# the baseline's 60) on top of the baseline's 60 right + 60 middle (180
+# total: 120 right + 60 middle) -- policy_graphs'
+# generate_set_table_episode_selection.py (--seed 42) guarantees the
+# baseline's indices are a strict subset of this split's, matching
+# diffusion_policy's set_table_v2_plusright config.
+store_path: ???
+abs_action: false
+rename: {}
+episode_ids: ???
+shape_meta:
+  obs:
+    wrist_image_left:
+      shape: [180, 320, 3]
+      type: rgb
+      channel_order: rgb
+    wrist_image_right:
+      shape: [180, 320, 3]
+      type: rgb
+      channel_order: rgb
+    exterior_image_1_left:
+      shape: [180, 320, 3]
+      type: rgb
+      channel_order: rgb
+    joint_positions:
+      shape: [7]
+      type: low_dim
+    gripper_position:
+      shape: [1]
+      type: low_dim
+  action:
+    shape: [8]

@@ -1,31 +1,25 @@
 name: set_table_baseline
-store_path: /mnt/ssdB/erik/droid_converted
+# PENDING: store_path/episode_ids below are being regenerated -- the
+# original droid_converted store (used until now) never recorded
+# wrist_image_right, so it's being rebuilt from raw SVOs with all three
+# cameras (right-eye decode of the wrist ZED, robo_dataset's
+# `SERIAL:right` camera spec), task-filtered + idle-trimmed into a new
+# set_table store, then re-run through policy_graphs'
+# generate_set_table_episode_selection.py (--seed 42) to get the baseline
+# 60 "prepare plate - milk right" + 60 "prepare plate - milk middle"
+# indices fresh against that store. ??? (Hydra required-value marker)
+# until filled in -- do not guess a store_path/episode_ids here.
+store_path: ???
 abs_action: false
 rename: {}
-# Fixed, reproducible subset of the shared droid_converted store (725
-# episodes across many tasks) -- exactly the episodes whose recorded task
-# (droid_converted/tasks.json) is "prepare plate - milk right" or "prepare
-# plate - milk middle", the same task_filter diffusion_policy's
-# set_table_baseline config uses, but computed once and frozen here as
-# explicit indices (rgrl.data._convert_episode_subset takes a flat list,
-# not a runtime task filter -- see configs/data/prepare_tray_baseline.yaml).
-episode_ids:
-  [
-    73, 75, 76, 77, 78, 79, 80, 553, 554, 556, 560, 561, 564, 565, 566, 567,
-    568, 569, 570, 573, 574, 575, 576, 578, 579, 580, 581, 582, 586, 587,
-    588, 591, 593, 595, 596, 597, 598, 600, 602, 603, 604, 605, 607, 608,
-    609, 610, 611, 612, 613, 615, 616, 617, 619, 621, 623, 624, 626, 627,
-    629, 631, 632, 633, 634, 635, 636, 637, 638, 640, 641, 642, 643, 644,
-    645, 646, 647, 648, 649, 650, 653, 654, 656, 657, 659, 661, 662, 663,
-    665, 666, 668, 669, 670, 671, 672, 674, 676, 677, 678, 679, 681, 682,
-    683, 686, 688, 689, 690, 691, 692, 693, 694, 697, 699, 700, 702, 704,
-    705, 707, 708, 710, 711, 712, 716, 718, 719, 720, 723,
-  ]
+episode_ids: ???
 shape_meta:
   obs:
-    # droid_converted only ever recorded these two cameras -- no trimming
-    # needed here, unlike prepare_tray_baseline's three-camera source.
     wrist_image_left:
+      shape: [180, 320, 3]
+      type: rgb
+      channel_order: rgb
+    wrist_image_right:
       shape: [180, 320, 3]
       type: rgb
       channel_order: rgb
