@@ -2,6 +2,24 @@ name: prepare_tray_baseline
 store_path: /home/erbauer/policy_graphs/data/droid_converted_prepare_tray_trimmed
 abs_action: false
 rename: {}
+# Fixed, reproducible 120-episode subset of this store's 132 episodes --
+# the same explicit indices diffusion_policy's prepare_tray_baseline config
+# freezes via episodes_per_task (prepare tray - top: 60, prepare tray -
+# bottom: 60), merged and sorted here since rgrl.data._convert_episode_subset
+# (see configs/rollout_env's _partial_ pattern for the general idea) takes a
+# flat list, not a per-task dict -- selection logic is a one-off, offline
+# concern (which indices to pick), not something the training path re-derives
+# from tasks.json every run.
+episode_ids:
+  [
+    0, 1, 2, 3, 4, 5, 6, 7, 10, 12, 13, 14, 15, 16, 18, 19, 20, 21, 22, 23,
+    24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41,
+    42, 43, 44, 45, 46, 47, 48, 50, 51, 52, 53, 54, 56, 57, 58, 59, 60, 61,
+    62, 63, 64, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80,
+    82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99,
+    100, 101, 102, 103, 104, 106, 107, 108, 109, 110, 111, 112, 113, 114,
+    116, 117, 119, 120, 121, 122, 123, 124, 125, 127, 128, 129, 130, 131,
+  ]
 shape_meta:
   obs:
     wrist_image_left:

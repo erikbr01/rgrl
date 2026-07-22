@@ -70,10 +70,17 @@ def _conversion_code_hashes(source_kind: str) -> dict[str, str]:
         targets["robo_dataset.backends.zarr_backend.ZarrStoreWriter"] = ZarrStoreWriter
         targets["robo_dataset.convert.convert"] = robo_convert
     else:
+        from robo_dataset.backends.video import VideoStoreWriter
+        from robo_dataset.backends.zarr_backend import ZarrStoreWriter
+        from robo_dataset.convert import convert as robo_convert
         from robo_dataset.store_factory import open_store
 
         targets["rgrl.data._convert_from_store"] = _convert_from_store
+        targets["rgrl.data._convert_episode_subset"] = _convert_episode_subset
         targets["robo_dataset.store_factory.open_store"] = open_store
+        targets["robo_dataset.convert.convert"] = robo_convert
+        targets["robo_dataset.backends.video.VideoStoreWriter"] = VideoStoreWriter
+        targets["robo_dataset.backends.zarr_backend.ZarrStoreWriter"] = ZarrStoreWriter
     return {name: _code_hash(obj) for name, obj in targets.items()}
 
 
@@ -179,17 +186,27 @@ def _convert(source_cfg: dict, target_shape_meta: dict, out: Path) -> None:
 
 def _convert_from_store(source_cfg: dict, target_shape_meta: dict, out: Path) -> None:
     """Adapt a dataset already in a robo_dataset-native format (zarr, video,
-    lerobot, ...) for rgrl. Unlike `_convert`, there is no per-frame rewrite:
-    the on-disk files are symlinked as-is into the cache dir (image keys the
-    target doesn't declare, e.g. a dropped camera, are simply never read —
-    EpisodeStore only touches keys present in `target_shape_meta`) and only
-    rgrl's stats/env_meta sidecars are computed fresh.
+    lerobot, ...) for rgrl.
 
-    Because nothing is rewritten, `rename` and channel_order/quat_convention
-    conversions aren't supported here (they'd require rewriting the bytes on
-    disk) — only an exact-name, exact-convention subset of the source is
-    representable this way. Raise rather than silently ignore a declared
-    conversion that won't actually happen."""
+    Default (no `episode_ids`): no per-frame rewrite -- the on-disk files
+    are symlinked as-is into the cache dir (image keys the target doesn't
+    declare, e.g. a dropped camera, are simply never read — EpisodeStore
+    only touches keys present in `target_shape_meta`) and only rgrl's
+    stats/env_meta sidecars are computed fresh.
+
+    `episode_ids`, if given (a list of source episode indices, in the order
+    to keep them): builds a fresh store containing only those episodes,
+    renumbered contiguously from 0 -- see `_convert_episode_subset`. Every
+    store format requires contiguous 0-based episodes, so an arbitrary
+    subset can't be symlinked the way the whole store can; this re-encodes
+    via robo_dataset.convert.convert instead of hand-reconstructing a
+    format's on-disk invariants (episode counts, boundaries, ...) here.
+
+    Because the default path rewrites nothing, `rename` and channel_order/
+    quat_convention conversions aren't supported (they'd require rewriting
+    the bytes on disk) — only an exact-name, exact-convention subset of the
+    source is representable this way, `episode_ids` or not. Raise rather
+    than silently ignore a declared conversion that won't actually happen."""
     from robo_dataset.store_factory import open_store
 
     store_path = Path(source_cfg["store_path"])
@@ -211,21 +228,26 @@ def _convert_from_store(source_cfg: dict, target_shape_meta: dict, out: Path) ->
             )
 
     src = open_store(str(store_path))
+    episode_ids = source_cfg.get("episode_ids")
 
     out.mkdir(parents=True, exist_ok=True)
-    for entry in ("meta.json", "videos", "data"):
-        src_entry = store_path / entry
-        if src_entry.exists():
-            (out / entry).symlink_to(src_entry.resolve())
+    if episode_ids is None:
+        for entry in ("meta.json", "videos", "data"):
+            src_entry = store_path / entry
+            if src_entry.exists():
+                (out / entry).symlink_to(src_entry.resolve())
+        dst = src
+    else:
+        _convert_episode_subset(src, out, target_shape_meta, image_keys, list(episode_ids))
+        dst = open_store(str(out))
 
-    n = int(src.episode_ends[-1]) if len(src.episode_ends) else 0
+    n = int(dst.episode_ends[-1]) if len(dst.episode_ends) else 0
     stats_keys = {
-        k: src.get_sequence(source_key_of[k], 0, n).astype(np.float32)
+        k: dst.get_sequence(k, 0, n).astype(np.float32)
         for k in target_shape_meta["obs"]
         if k not in image_keys
     }
-    action_src_key = rename.get("action", "action")
-    stats_keys["action"] = src.get_sequence(action_src_key, 0, n).astype(np.float32)
+    stats_keys["action"] = dst.get_sequence("action", 0, n).astype(np.float32)
 
     meta_path = store_path / "meta.json"
     fps = json.loads(meta_path.read_text()).get("fps") if meta_path.exists() else None
@@ -237,3 +259,39 @@ def _convert_from_store(source_cfg: dict, target_shape_meta: dict, out: Path) ->
         source=str(store_path),
         fps=fps,
     )
+
+
+def _convert_episode_subset(
+    src, out: Path, target_shape_meta: dict, image_keys: list[str], episode_ids: list[int]
+) -> None:
+    """Write a fresh store containing only `episode_ids`, in that order,
+    renumbered contiguously from 0 -- the reproducible, auditable way to
+    pin a training subset out of a larger shared store (e.g. one DROID
+    store holding many tasks): the exact indices live in the data config,
+    not a random/percentage sample recomputed differently every run."""
+    from robo_dataset.convert import convert as robo_convert
+
+    bad = [i for i in episode_ids if i < 0 or i >= src.n_episodes]
+    if bad:
+        raise ValueError(f"episode_ids {bad} out of range for a {src.n_episodes}-episode store")
+
+    keys = list(target_shape_meta["obs"].keys()) + ["action"]
+    key_shapes = {k: src.frame_shape(k) for k in keys}
+    key_dtypes = {k: src.frame_dtype(k) for k in keys}
+
+    if image_keys:
+        from robo_dataset.backends.video import VideoStoreWriter
+
+        dst = VideoStoreWriter.create(
+            str(out),
+            key_shapes=key_shapes,
+            key_dtypes=key_dtypes,
+            n_episodes=len(episode_ids),
+            image_keys=image_keys,
+        )
+    else:
+        from robo_dataset.backends.zarr_backend import ZarrStoreWriter
+
+        dst = ZarrStoreWriter.create(str(out), key_shapes=key_shapes, key_dtypes=key_dtypes)
+
+    robo_convert(src, dst, keys=keys, episode_indices=episode_ids, verbose=True)

@@ -1,15 +1,19 @@
-"""Batched robomimic rollout evaluation.
+"""Batched, non-realtime rollout evaluation.
 
-Runs N robosuite envs in lockstep via rgrl.inference.runner.Runner
+Runs N env instances in lockstep via rgrl.inference.runner.Runner
 (mode=SYNC, control_hz=None — as fast as possible): every policy call
 batches all still-running envs, then each env executes the n_action_steps
-chunk. Episodes end on task success or max_steps. The env itself
-(rgrl.inference.robomimic_env.RobomimicSimEnv) and the policy
+chunk. Episodes end on task success or max_steps. The env is built by
+whichever rgrl.inference.envs.*.build() function `build_env` (from
+configs/rollout_env/*.yaml) resolves to, and the policy
 (rgrl.inference.policy_client.LocalPolicy, or HttpPolicy if `server` is set)
-are the same building blocks rgrl/inference/run_realtime.py uses for
-real-time/DROID rollouts — this module only owns the batched,
+is built by rgrl.inference.rollout_cli.build_policy — the same shared
+building blocks run_realtime.py and collect_rollouts.py use for
+real-time-paced rollouts — this module only owns the batched,
 statistical-eval control flow (episode chunking, success aggregation,
-profiling, result persistence).
+profiling, result persistence). In practice only sim backends make sense
+here (a real robot can't parallelize itself or outrun physical time), but
+nothing in this module hardcodes which one.
 
 Results land in the checkpoint's experiment directory, one subfolder per eval
 config, so re-sweeping samplers on the same checkpoint doesn't clobber prior
@@ -38,7 +42,6 @@ import torch
 from rgrl.inference.checkpoint import InferenceConfig, load_policy  # re-exported, see checkpoint.py
 from rgrl.logutil import log_to_file
 from rgrl.profiler import SectionProfiler
-from rgrl.store import KIND_IMAGE, KIND_STATE
 
 log = logging.getLogger(__name__)
 
@@ -53,7 +56,7 @@ class RolloutConfig:
 
     max_steps: int = 400
     # each env instance is its own worker process (rgrl/inference/
-    # robomimic_env.py), so this scales across cores: 25 is ~free on a
+    # envs/robomimic.py), so this scales across cores: 25 is ~free on a
     # 32-core box and cuts a 50-episode eval to 2 batches. Note the policy's
     # noise draws depend on batch size, so changing this changes which
     # trajectories get sampled (not their statistics).
@@ -89,6 +92,7 @@ def evaluate(
     ckpt: Path,
     inference: InferenceConfig,
     env: RolloutConfig,
+    build_env,  # policy -> Env; instantiate(cfg.rollout_env) -- see configs/rollout_env/*.yaml
     out: Path | None = None,  # default: ckpt's experiment dir
     label: str | None = None,  # evals/<label>/ ; default: derived from inference overrides
     device: str = "cuda",
@@ -97,7 +101,7 @@ def evaluate(
     eval_dir = (out or ckpt.parent) / "evals" / (label or default_label(inference, env))
     eval_dir.mkdir(parents=True, exist_ok=True)
     with log_to_file(eval_dir / "eval.log"):
-        return _evaluate(ckpt, inference, env, torch.device(device), eval_dir, server)
+        return _evaluate(ckpt, inference, env, torch.device(device), eval_dir, server, build_env)
 
 
 def _evaluate(
@@ -106,15 +110,17 @@ def _evaluate(
     env_cfg: RolloutConfig,
     device: torch.device,
     eval_dir: Path,
-    server: str | None = None,
+    server: str | None,
+    build_env,
 ) -> dict:
-    """Runs num_envs parallel robosuite instances in lockstep via the shared
+    """Runs num_envs env instances in lockstep via the shared
     rgrl.inference.runner.Runner (mode=SYNC, control_hz=None — as fast as
     possible, the same behavior this loop always had), rather than a
     bespoke control loop — see rgrl/inference/runner.py. The policy is
-    loaded in-process (LocalPolicy, the default — identical to before this
-    refactor) or served remotely (HttpPolicy, if `server` is set), behind
-    the same rgrl.inference.policy_client.PolicyBase interface either way.
+    built by rgrl.inference.rollout_cli.build_policy (in-process LocalPolicy
+    by default, or HttpPolicy if `server` is set) and the env by `build_env`,
+    behind the same rgrl.inference.policy_client.PolicyBase / rgrl.inference
+    .runner.Env interfaces either way.
     """
     (eval_dir / "config.json").write_text(
         json.dumps(
@@ -130,47 +136,23 @@ def _evaluate(
     )
     torch.manual_seed(env_cfg.seed)
 
-    from rgrl.inference.policy_client import HttpPolicy, LocalPolicy
-    from rgrl.inference.robomimic_env import RobomimicSimEnv
+    from rgrl.inference.rollout_cli import build_policy, meta_from_policy
     from rgrl.inference.runner import InferenceMode, Runner
 
     n_envs = min(env_cfg.parallel_envs, env_cfg.episodes)
 
-    if server is not None:
-        policy_client = HttpPolicy(server)
-        meta = policy_client.ensure_meta()
-        shape_meta = meta["shape_meta"]
-        image_keys = sorted(k for k, v in shape_meta["obs"].items() if v.get("type") == "rgb")
-        state_keys = sorted(k for k, v in shape_meta["obs"].items() if v.get("type", "low_dim") != "rgb")
-        action_dim = int(meta["action_dim"])
-        env_meta = meta["env_meta"]
-        n_act = int(meta["n_action_steps"])
-        step = None
-        image_hw = tuple(shape_meta["obs"][image_keys[0]]["shape"][:2]) if image_keys else None
-    else:
-        # warmup_batch_size=n_envs: this loop always calls predict_action at
-        # exactly this batch size, so torch.compile's one-time compilation
-        # cost is paid up front (at LocalPolicy construction) instead of on
-        # the first real runner.run_batch() call below.
-        local_inference = dataclasses.replace(inference, warmup_batch_size=n_envs)
-        policy_client = LocalPolicy(str(ckpt), device=str(device), inference=local_inference)
-        store = policy_client.store
-        image_keys = sorted(k for k, s in store.meta.keys.items() if s.kind == KIND_IMAGE)
-        state_keys = sorted(k for k, s in store.meta.keys.items() if s.kind == KIND_STATE)
-        action_dim = int(store.meta.keys["action"].shape[0])
-        env_meta = store.meta.env_meta
-        n_act = policy_client.policy.cfg.n_action_steps
-        step = policy_client.step
-        image_hw = tuple(store.meta.keys[image_keys[0]].shape[:2]) if image_keys else None
-
-    env = RobomimicSimEnv(
-        env_meta=env_meta,
-        image_keys=image_keys,
-        state_keys=state_keys,
-        action_dim=action_dim,
-        num_envs=n_envs,
-        image_hw=image_hw,
+    # warmup_batch_size=n_envs: this loop always calls predict_action at
+    # exactly this batch size, so torch.compile's one-time compilation cost
+    # (LocalPolicy path only -- unused when served remotely) is paid up
+    # front at construction instead of on the first real run_batch() call.
+    local_inference = dataclasses.replace(inference, warmup_batch_size=n_envs)
+    policy_client = build_policy(
+        ckpt=None if server else str(ckpt), server=server, inference=local_inference, device=str(device)
     )
+    meta = meta_from_policy(policy_client)
+    step = getattr(policy_client, "step", None)
+
+    env = build_env(policy_client, num_envs=n_envs)
 
     prof = SectionProfiler(device)
     runner = Runner(
@@ -178,7 +160,7 @@ def _evaluate(
         policy=policy_client,
         mode=InferenceMode(env_cfg.mode),
         control_hz=None,  # as fast as possible -- statistical eval, not real-time
-        open_loop_horizon=n_act,
+        open_loop_horizon=int(meta["n_action_steps"]),
         max_timesteps=env_cfg.max_steps,
         replan_step=env_cfg.replan_step,
         rtc=env_cfg.rtc,
@@ -189,7 +171,8 @@ def _evaluate(
     t_start = time.perf_counter()
     remaining, chunk_num = env_cfg.episodes, 0
     while remaining > 0:
-        env.set_seed(env_cfg.seed + chunk_num * n_envs)  # matches pre-refactor per-env seeding exactly
+        if hasattr(env, "set_seed"):  # robomimic-specific reseed-per-chunk, not part of the generic Env protocol
+            env.set_seed(env_cfg.seed + chunk_num * n_envs)  # matches pre-refactor per-env seeding exactly
         record = runner.run_batch()
         take = min(n_envs, remaining)
         successes += record.dones[:take].tolist()

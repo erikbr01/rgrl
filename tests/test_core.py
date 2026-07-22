@@ -8,7 +8,7 @@ from robo_dataset.backends.zarr_backend import ZarrStoreWriter
 from robo_dataset.normalization import fit_key
 from robo_dataset.transforms.gpu_batch import CenterCrop, RandomCrop
 
-from rgrl.dataset import GpuSequenceDataset, Windows
+from rgrl.dataset import CpuSequenceDataset, GpuSequenceDataset, Windows, build_dataset
 from rgrl.nets.unet1d import ConditionalUnet1D
 from rgrl.normalize import Normalizer
 from rgrl.policies.diffusion import DiffusionPolicy
@@ -72,6 +72,108 @@ def test_gather_matches_direct_indexing(tiny_store):
     assert torch.equal(batch["state"][1], raw[ds.obs_idx[8]])
 
 
+def test_val_split_loads_only_its_own_episodes_not_a_full_store_copy(tiny_store):
+    """Regression test: train and val must each load only their own split's
+    frames, not a full duplicate copy of the store -- previously
+    GpuSequenceDataset.__init__ called store.load(key) unconditionally
+    (every episode, regardless of split), so a train+val pair together
+    loaded the whole store onto the device TWICE. With 1 val episode out
+    of 3 (lengths 7, 5, 9 -> 21 total frames), train should hold 12 frames
+    and val should hold 9 -- 21 total, not 42."""
+    train = GpuSequenceDataset(
+        tiny_store, Windows(2, 4), torch.device("cpu"), val_episodes=1, val_split="train"
+    )
+    val = GpuSequenceDataset(
+        tiny_store, Windows(2, 4), torch.device("cpu"), val_episodes=1, val_split="val"
+    )
+    assert train.tensors["state"].shape[0] == 7 + 5
+    assert val.tensors["state"].shape[0] == 9
+    assert train.num_samples == 7 + 5
+    assert val.num_samples == 9
+
+    # val's data must be episode 2's (the last episode) actual frames, not
+    # episode 0's or garbage from a wrong offset -- get it independently
+    # from the store and compare.
+    expected = tiny_store.load("state", episode_range=(2, 3))
+    np.testing.assert_array_equal(val.tensors["state"].numpy(), expected)
+
+    # val's windowing must be entirely local (0-based), never referencing
+    # frames outside its own 9-frame tensor -- a stale absolute offset
+    # would index past the end (or into the wrong data) instead of raising.
+    assert val.obs_idx.max().item() < 9
+    assert val.act_idx.max().item() < 9
+    batch = val.gather(torch.tensor([0]))
+    np.testing.assert_array_equal(batch["state"][0, -1].numpy(), expected[0])
+
+
+def test_cpu_sequence_dataset_batches_and_gather_are_structurally_correct(tiny_store):
+    """CpuSequenceDataset (real DataLoader, spawn worker processes) must
+    produce the same shapes/dtypes/keys GpuSequenceDataset does for the
+    same store -- not bit-identical sampling (DataLoader's own shuffle
+    replaces the custom epoch_perm scheme for this mode, intentionally),
+    just structurally correct, and it must actually complete several
+    batches through real worker processes without hanging."""
+    windows = Windows(2, 4)
+    gpu_ds = GpuSequenceDataset(tiny_store, windows, torch.device("cpu"))
+    cpu_ds = CpuSequenceDataset(tiny_store, windows, torch.device("cpu"), num_workers=2)
+    assert cpu_ds.num_samples == gpu_ds.num_samples == 7 + 5 + 9
+
+    batches = cpu_ds.batches(batch_size=4, seed=0)
+    for _ in range(3):  # several batches -- exercises the persistent worker pool repeatedly
+        batch = next(batches)
+        assert set(batch.keys()) == {"state", "action", "action_is_pad"}
+        assert batch["state"].shape == (4, 2, 3)
+        assert batch["action"].shape == (4, 4, 2)
+        assert batch["action_is_pad"].shape == (4, 4)
+        assert batch["state"].dtype == torch.float32
+        assert batch["action_is_pad"].dtype == torch.bool
+
+    # gather() (the val-evaluation path) covers arbitrary explicit sample_ids
+    # directly, no DataLoader involved.
+    gathered = cpu_ds.gather(torch.tensor([0, 8, 20]))
+    assert gathered["state"].shape == (3, 2, 3)
+    assert gathered["action"].shape == (3, 4, 2)
+    np.testing.assert_array_equal(gathered["state"].numpy(), gpu_ds.gather(torch.tensor([0, 8, 20]))["state"].numpy())
+
+
+def test_build_dataset_stays_gpu_resident_on_cpu_device_regardless_of_threshold(tiny_store):
+    """pin_fallback_gb only ever matters for a CUDA target -- CPU-target
+    training has no VRAM to run out of, so build_dataset must always
+    return the plain GpuSequenceDataset there, even with a threshold of 0."""
+    ds = build_dataset(tiny_store, Windows(2, 4), torch.device("cpu"), pin_fallback_gb=0.0, dataloader_workers=4)
+    assert isinstance(ds, GpuSequenceDataset)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+def test_build_dataset_picks_cpu_dataset_past_the_gb_threshold_on_cuda():
+    """The actual dispatch condition build_dataset exists for: a CUDA
+    target whose split exceeds pin_fallback_gb gets CpuSequenceDataset
+    (dataloader_workers=0 or not -- the threshold alone decides the mode,
+    see build_dataset's docstring); comfortably under it stays
+    GpuSequenceDataset."""
+    import tempfile
+
+    from robo_dataset.backends.zarr_backend import ZarrStoreWriter
+
+    rng = np.random.default_rng(0)
+    with tempfile.TemporaryDirectory() as tmp:
+        key_shapes = {"state": (3,), "action": (2,)}
+        key_dtypes = {"state": np.float32, "action": np.float32}
+        w = ZarrStoreWriter.create(f"{tmp}/store", key_shapes=key_shapes, key_dtypes=key_dtypes)
+        ep = {"state": rng.normal(size=(5, 3)).astype(np.float32), "action": rng.normal(size=(5, 2)).astype(np.float32)}
+        w.put_episode(ep)
+        w.finalize()
+        write_sidecars(f"{tmp}/store", stats_keys={k: ep[k] for k in key_shapes}, source="test")
+        shape_meta = {"obs": {"state": {"shape": [3], "type": "low_dim"}}, "action": {"shape": [2]}}
+        store = EpisodeStore(f"{tmp}/store", shape_meta)
+
+        device = torch.device("cuda")
+        under = build_dataset(store, Windows(2, 4), device, pin_fallback_gb=1e6, dataloader_workers=0)
+        over = build_dataset(store, Windows(2, 4), device, pin_fallback_gb=0.0, dataloader_workers=0)
+        assert isinstance(under, GpuSequenceDataset)
+        assert isinstance(over, CpuSequenceDataset)
+
+
 def test_epoch_perm_reproducible(tiny_store):
     ds = GpuSequenceDataset(tiny_store, Windows(2, 4), torch.device("cpu"))
     assert torch.equal(ds.epoch_perm(1, 5), ds.epoch_perm(1, 5))
@@ -129,7 +231,7 @@ def test_diffusion_policy_sample_timesteps_buffer(tiny_store):
     # the formula it replaced, and predict_action still works end to end.
     policy = DiffusionPolicy(
         tiny_store, obs_horizon=2, horizon=4, n_action_steps=2,
-        down_dims=(8, 16), num_kp=4, image_hw=None,
+        down_dims=(8, 16), num_kp=4, data_transforms=[],
         train_timesteps=20, inference_steps=5, sampler="ddim",
     )
     ratio = 20 // 5
@@ -165,7 +267,7 @@ def _rtc_policy_checks(policy):
 def test_diffusion_policy_rtc(tiny_store):
     policy = DiffusionPolicy(
         tiny_store, obs_horizon=2, horizon=8, n_action_steps=2,
-        down_dims=(8, 16), num_kp=4, image_hw=None,
+        down_dims=(8, 16), num_kp=4, data_transforms=[],
         train_timesteps=20, inference_steps=5, sampler="ddim",
     )
     for sampler in ("ddim", "ddpm"):
@@ -176,7 +278,7 @@ def test_diffusion_policy_rtc(tiny_store):
 def test_flow_policy_rtc(tiny_store):
     policy = FlowPolicy(
         tiny_store, obs_horizon=2, horizon=8, n_action_steps=2,
-        down_dims=(8, 16), num_kp=4, image_hw=None, inference_steps=5,
+        down_dims=(8, 16), num_kp=4, data_transforms=[], inference_steps=5,
     )
     _rtc_policy_checks(policy)
 
@@ -217,7 +319,7 @@ def _trained_rtc_checks(policy):
 def test_diffusion_policy_trained_rtc(tiny_store):
     policy = DiffusionPolicy(
         tiny_store, obs_horizon=2, horizon=8, n_action_steps=2,
-        down_dims=(8, 16), num_kp=4, image_hw=None,
+        down_dims=(8, 16), num_kp=4, data_transforms=[],
         train_timesteps=20, inference_steps=5, sampler="ddim",
         max_action_prefix=3,
     )
@@ -229,7 +331,7 @@ def test_diffusion_policy_trained_rtc(tiny_store):
 def test_flow_policy_trained_rtc(tiny_store):
     policy = FlowPolicy(
         tiny_store, obs_horizon=2, horizon=8, n_action_steps=2,
-        down_dims=(8, 16), num_kp=4, image_hw=None, inference_steps=5,
+        down_dims=(8, 16), num_kp=4, data_transforms=[], inference_steps=5,
         max_action_prefix=3,
     )
     _trained_rtc_checks(policy)
@@ -238,7 +340,7 @@ def test_flow_policy_trained_rtc(tiny_store):
 def test_dit_flow_policy_trained_rtc(tiny_store):
     policy = DiTFlowPolicy(
         tiny_store, obs_horizon=2, horizon=8, n_action_steps=2,
-        hidden_size=32, depth=2, num_heads=4, num_kp=4, image_hw=None,
+        hidden_size=32, depth=2, num_heads=4, num_kp=4, data_transforms=[],
         inference_steps=5, max_action_prefix=3,
     )
     _trained_rtc_checks(policy)
@@ -248,7 +350,7 @@ def test_dit_flow_policy_without_prefix_training(tiny_store):
     # max_action_prefix=0: plain flow matching + inpainting-fallback rtc
     policy = DiTFlowPolicy(
         tiny_store, obs_horizon=2, horizon=8, n_action_steps=2,
-        hidden_size=32, depth=2, num_heads=4, num_kp=4, image_hw=None,
+        hidden_size=32, depth=2, num_heads=4, num_kp=4, data_transforms=[],
         inference_steps=5, max_action_prefix=0,
     )
     batch = {"state": torch.randn(4, 2, 3), "action": torch.randn(4, 8, 2)}
@@ -265,7 +367,7 @@ def test_rtc_matches_plain_predict_shapes(tiny_store):
     # plain predict_action is untouched by the _sample refactor
     policy = DiffusionPolicy(
         tiny_store, obs_horizon=2, horizon=8, n_action_steps=2,
-        down_dims=(8, 16), num_kp=4, image_hw=None,
+        down_dims=(8, 16), num_kp=4, data_transforms=[],
         train_timesteps=20, inference_steps=5, sampler="ddim",
     )
     action = policy.predict_action({"state": torch.randn(3, 2, 3)})

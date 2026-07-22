@@ -3,7 +3,10 @@
 Wraps `droid.robot_env.RobotEnv` with:
   - observation preprocessing (BGR/BGRA -> RGB, matching the DROID training
     data convention -- robo_dataset.backends.droid.DroidStore's MP4 decode
-    path does the identical conversion)
+    path does the identical conversion). Resizing to the checkpoint's
+    trained shape is the policy's job (rgrl.policies.base.ObsEncoder), not
+    this env's -- it hands over raw camera frames at whatever resolution
+    the sensor delivers.
   - `dry_run` mode for smoke-testing the control loop without hardware
 
 Obs key names match robo_dataset's DroidStore / real trained checkpoints
@@ -19,6 +22,12 @@ driver stack) is imported lazily so this module is importable anywhere;
 hardware code paths raise a clear error when it's absent. Dropped from the
 reference: save_droid_trajectory (DROID-format trajectory + mp4
 persistence) -- that's data collection, not inference.
+
+`build()` is the one place a rollout script turns "a loaded policy" into "an
+env it can act in" — see configs/rollout_env/droid.yaml, instantiated with
+_partial_: true. Unlike the robomimic backend, a real robot needs nothing
+from the policy's meta, so `policy` is accepted only for a uniform call
+signature across backends and otherwise ignored.
 """
 
 from __future__ import annotations
@@ -47,6 +56,11 @@ class DroidEnv:
     DEFAULT_WRIST_SERIAL = "14313307"
     DEFAULT_EXT1_SERIAL = "36716034"
     DEFAULT_EXT2_SERIAL = "37617599"
+
+    # A real robot has no ground-truth success signal (step() always reports
+    # done=False) -- callers that report a rollout's outcome (run_realtime.py)
+    # check this rather than assuming `dones` means anything here.
+    supports_success = False
 
     num_envs = 1
 
@@ -90,13 +104,17 @@ class DroidEnv:
     def _init_robot(self) -> None:
         try:
             import droid.robot_env as robot_env_mod
+            from droid.camera_utils.info import get_camera_type
         except ImportError as e:
             raise ImportError(f"importing 'droid.robot_env' failed -- this {_DROID_HINT}") from e
-        camera_kwargs = {
-            self.wrist_serial: {"image": True},
-            self.ext1_serial: {"image": True},
-            self.ext2_serial: {"image": True},
-        }
+        # MultiCameraWrapper looks settings up by camera *type* string
+        # ("hand_camera" | "varied_camera" | "fixed_camera"), not by serial
+        # -- keying by serial here silently no-ops every per-camera setting.
+        camera_kwargs = {}
+        for serial in (self.wrist_serial, self.ext1_serial, self.ext2_serial):
+            cam_type = get_camera_type(serial)
+            if cam_type is not None:
+                camera_kwargs[cam_type] = {"image": True}
         self._robot_env = robot_env_mod.RobotEnv(
             action_space=self._robot_action_space, camera_kwargs=camera_kwargs, do_reset=True,
         )
@@ -200,7 +218,8 @@ class DroidEnv:
 
     @staticmethod
     def _preprocess_image(img: np.ndarray) -> np.ndarray:
-        # Only convert colour space — resizing is a policy-server-side concern.
+        # Only convert colour space — resizing to the checkpoint's trained
+        # shape is the policy's job (rgrl.policies.base.ObsEncoder).
         if img.ndim == 3 and img.shape[2] == 4:
             img = cv2.cvtColor(img, cv2.COLOR_BGRA2RGB)
         elif img.ndim == 3 and img.shape[2] == 3:
@@ -218,3 +237,15 @@ class DroidEnv:
             "exterior_image_1_left": rng.integers(0, 255, (180, 320, 3), dtype=np.uint8),
             "exterior_image_2_left": rng.integers(0, 255, (180, 320, 3), dtype=np.uint8),
         }
+
+
+def build(policy, num_envs: int = 1, **kwargs) -> DroidEnv:
+    """`policy` is unused -- a real robot needs nothing from a checkpoint's
+    meta (unlike the robomimic backend, which reads env_meta/shape_meta off
+    it) -- accepted only so every rollout script can call build(policy,
+    **kwargs) the same way regardless of which backend is selected.
+    `num_envs` is accepted the same way (every real-time script passes it
+    uniformly) but must be 1 -- one physical robot, no parallelizing it."""
+    if num_envs != 1:
+        raise ValueError(f"DroidEnv is always one physical robot, got num_envs={num_envs}")
+    return DroidEnv(**kwargs)

@@ -1,8 +1,11 @@
-# Two cameras only (wrist_image_right dropped) so the run fits on a single
-# GPU -- wrist_image_left + exterior_image_1_left is the standard DROID pair
-# (see policy_graphs/docs/droid_workflow.md's camera table).
+# All three DROID cameras this store has (see
+# policy_graphs/docs/droid_workflow.md's camera table).
 obs:
   wrist_image_left:
+    shape: [180, 320, 3]
+    type: rgb
+    channel_order: rgb
+  wrist_image_right:
     shape: [180, 320, 3]
     type: rgb
     channel_order: rgb

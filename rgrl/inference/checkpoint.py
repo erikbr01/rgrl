@@ -1,11 +1,20 @@
-"""Load a trained policy checkpoint — no env dependency at all.
+"""Load a trained policy checkpoint — no env or training-data dependency at all.
 
 Moved out of rgrl/eval_robomimic.py (which imports robomimic/robosuite at
 module level) so a policy-serving process (rgrl/inference/policy_server.py)
-never has to install them: this module only needs torch, hydra, and
-rgrl.data.load_store. rgrl/eval_robomimic.py re-imports InferenceConfig and
-load_policy from here for backward compatibility (configs/inference/*.yaml's
+never has to install them: this module only needs torch and hydra.
+rgrl/eval_robomimic.py re-imports InferenceConfig and load_policy from here
+for backward compatibility (configs/inference/*.yaml's
 _target_: rgrl.eval_robomimic.InferenceConfig keeps resolving unchanged).
+
+load_policy builds its `store` from the checkpoint's own saved shape_meta
+(_ConfigStore) rather than reopening the real training dataset — a
+checkpoint's weights (incl. fitted normalizer buffers) are fully
+self-contained, so nothing about loading it for inference should require
+the original bytes on disk. The one thing this drops is real `env_meta`
+(e.g. robosuite's simulator kwargs): _ConfigStore's is always empty, which
+is fine for real-robot inference (DroidEnv never reads it) but means a
+robomimic sim rollout needs the actual EpisodeStore, not this shortcut.
 """
 
 from __future__ import annotations
@@ -14,11 +23,11 @@ import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import numpy as np
 import torch
 from hydra.utils import instantiate
 
-from rgrl.data import load_store
-from rgrl.store import KIND_IMAGE, EpisodeStore
+from rgrl.store import KIND_ACTION, KIND_IMAGE, KIND_STATE, EpisodeStore, KeySpec, StoreMeta
 
 log = logging.getLogger(__name__)
 
@@ -31,6 +40,7 @@ class InferenceConfig:
 
     use_ema: bool = True
     bf16: bool = False
+    tf32: bool = True  # torch.set_float32_matmul_precision("high"); no-op off cuda
     # torch.compile the UNet (mode="reduce-overhead", its own internal CUDA
     # graph) — on by default since inference latency matters; only applied
     # if device is CUDA (no-ops with a log line on CPU). Pays a one-time
@@ -68,6 +78,53 @@ class InferenceConfig:
 _WARMUP_CALLS = 3  # enough for torch.compile's reduce-overhead mode to finish tracing + CUDA-graph capture
 
 
+class _ConfigStore:
+    """EpisodeStore stand-in built only from a checkpoint's saved target
+    shape_meta -- no training data on disk required.
+
+    Loading a checkpoint for inference never needs the training bytes: the
+    policy's weights (including fitted normalizer scale/offset, wrapped as
+    buffers by rgrl/normalize.py's Normalizer) come entirely from the
+    checkpoint's state_dict. The only thing `store` is for at construction
+    time is telling the policy its own key shapes/kinds -- already frozen
+    into the checkpoint's config -- so this stands in for a real
+    EpisodeStore with placeholder stats (ones/zeros, right shape only;
+    load_state_dict overwrites them immediately after).
+
+    env_meta (e.g. robosuite's simulator kwargs) is a fact about the real
+    recorded data, not the schema -- but rgrl/train_loop.py saves it into
+    the checkpoint's own config (as `store.meta.env_meta` at train time), so
+    it's passed in here rather than reconstructed. That keeps a checkpoint
+    fully self-contained for a robomimic sim rollout too: no reopening the
+    original dataset at eval time.
+    """
+
+    def __init__(self, target_shape_meta: dict, env_meta: dict | None = None):
+        keys: dict[str, KeySpec] = {}
+        for key, spec in target_shape_meta["obs"].items():
+            kind = KIND_IMAGE if spec.get("type", "low_dim") == "rgb" else KIND_STATE
+            keys[key] = KeySpec(
+                shape=list(spec["shape"]),
+                dtype="uint8" if kind == KIND_IMAGE else "float32",
+                kind=kind,
+                channel_order=spec.get("channel_order"),
+                quat_convention=spec.get("quat_convention"),
+            )
+        keys["action"] = KeySpec(
+            shape=list(target_shape_meta["action"]["shape"]), dtype="float32", kind=KIND_ACTION
+        )
+        self.meta = StoreMeta(episode_ends=[], keys=keys, env_meta=env_meta or {})
+        self.stats = {
+            k: {
+                "method": "none",
+                "scale": np.ones(spec.shape, dtype=np.float32).tolist(),
+                "offset": np.zeros(spec.shape, dtype=np.float32).tolist(),
+            }
+            for k, spec in keys.items()
+            if spec.kind != KIND_IMAGE
+        }
+
+
 def _dummy_batch(
     store: EpisodeStore, obs_horizon: int, batch_size: int, device: torch.device
 ) -> dict[str, torch.Tensor]:
@@ -86,9 +143,12 @@ def _dummy_batch(
 def load_policy(
     ckpt_path: Path, inference: InferenceConfig, device: torch.device
 ) -> tuple[torch.nn.Module, EpisodeStore, int]:
+    if inference.tf32:
+        torch.set_float32_matmul_precision("high")
+
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     tc = ckpt["config"]
-    store = load_store(tc["store"], tc["target"])
+    store = _ConfigStore(tc["target"], tc.get("env_meta"))
     policy_cfg = dict(tc["policy"])  # the resolved config that built it at train time — _target_ and all
     if inference.sampler is not None:
         policy_cfg["sampler"] = inference.sampler
