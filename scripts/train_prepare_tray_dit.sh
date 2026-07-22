@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Trains the dit_flow (ABC-DiT + rectified flow) policy on the
-# prepare_tray_baseline DROID task. Two cameras only (wrist_image_right
-# dropped) to fit training on a single GPU -- see
-# configs/target/prepare_tray_baseline.yaml. Uses a fixed 120-episode
+# prepare_tray_baseline DROID task, using all three of this store's
+# cameras (wrist_image_left, wrist_image_right, exterior_image_1_left) --
+# see configs/target/prepare_tray_baseline.yaml. Uses a fixed 120-episode
 # subset (episode_ids in configs/data/prepare_tray_baseline.yaml) rather
 # than the store's full 132 -- see rgrl.data._convert_episode_subset.
 #
