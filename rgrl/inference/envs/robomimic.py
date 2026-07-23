@@ -15,6 +15,11 @@ EpisodeStore — so this module needs only robomimic/robosuite/mujoco (in the
 workers), never torch or rgrl.data. A remote policy server's /meta response
 (rgrl/inference/policy_server.py) carries exactly this information, so an
 env-only process never needs to load the store itself.
+
+`build()` is the one place a rollout script turns "a loaded policy" into "an
+env it can act in" — see configs/rollout_env/robomimic.yaml, instantiated
+with _partial_: true (policy isn't known yet at config-load time) exactly
+like rgrl.transforms.data_transforms_pipeline's image_keys binding.
 """
 
 from __future__ import annotations
@@ -95,6 +100,11 @@ def _stack_frames(frames: list[dict[str, np.ndarray]]) -> dict[str, np.ndarray]:
 class RobomimicSimEnv:
     """Env protocol implementation: `num_envs` robosuite worker processes."""
 
+    # `dones` reflects robosuite's real is_success() -- callers that report
+    # a rollout's outcome (run_realtime.py) can trust it, unlike a real
+    # robot's env (see DroidEnv.supports_success).
+    supports_success = True
+
     def __init__(
         self,
         env_meta: dict,
@@ -171,3 +181,28 @@ class RobomimicSimEnv:
                 pass
         for proc in self._procs:
             proc.join(timeout=10)
+
+
+def build(policy, num_envs: int = 1, seed: int = 0, control_hz: float | None = None) -> RobomimicSimEnv:
+    """Construct a RobomimicSimEnv from a loaded policy's meta -- derives
+    image_keys/state_keys/image_hw from shape_meta once here instead of at
+    every call site. `control_hz` is accepted and ignored: real-time rollout
+    scripts pass it uniformly to whichever backend's build() they call (only
+    DroidEnv's needs it), so this stays a no-op rather than forcing a
+    per-backend branch on the caller."""
+    from rgrl.inference.rollout_cli import meta_from_policy
+
+    meta = meta_from_policy(policy)
+    shape_meta = meta["shape_meta"]
+    image_keys = sorted(k for k, v in shape_meta["obs"].items() if v.get("type") == "rgb")
+    state_keys = sorted(k for k, v in shape_meta["obs"].items() if v.get("type", "low_dim") != "rgb")
+    image_hw = tuple(shape_meta["obs"][image_keys[0]]["shape"][:2]) if image_keys else None
+    return RobomimicSimEnv(
+        env_meta=meta["env_meta"],
+        image_keys=image_keys,
+        state_keys=state_keys,
+        action_dim=int(meta["action_dim"]),
+        num_envs=num_envs,
+        seed=seed,
+        image_hw=image_hw,
+    )

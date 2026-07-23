@@ -1,11 +1,13 @@
-"""CLI: collect real DROID rollouts in the canonical policy_graphs layout,
-with per-step activation capture -- rgrl's equivalent of diffusion_policy's
-scripts/droid_collect_rollouts.py.
+"""Hydra CLI: collect rollouts against any rollout_env backend (real DROID
+robot or robomimic sim -- see configs/rollout_env/*.yaml) with human keyboard
+labeling and per-step activation capture -- rgrl's equivalent of
+diffusion_policy's scripts/droid_collect_rollouts.py, generalized beyond
+DROID. Runs on the robot workstation for a real session (requires the DROID
+stack; ``rollout_env.dry_run=true`` exercises the full loop anywhere with
+synthetic obs), or anywhere for a sim session.
 
-Runs on the robot workstation (requires the DROID stack; ``--dry-run``
-exercises the full loop anywhere with synthetic obs). Deliberately layered
-*on top of* rgrl.inference.runner.Runner/droid_env.DroidEnv rather than
-folding recording into them: those stay a clean "run the policy" core (see
+Deliberately layered *on top of* rgrl.inference.runner.Runner rather than
+folding recording into an env: envs stay a clean "run the policy" core (see
 their module docstrings), and RecordingEnv below just wraps the Env
 protocol from outside to additionally capture what a rollout-collection
 session needs.
@@ -13,13 +15,20 @@ session needs.
 Output layout::
 
     <output_dir>/recordings/ep_YYYYMMDDTHHMMSS/
-        trajectory.h5                  robot state + actions (DROID format,
-                                        written via the droid package's own
-                                        TrajectoryWriter -- readable by
-                                        robo_dataset's DroidStore)
-        <camera_key>.mp4                one per recorded camera, CRF-18 H.264
+        trajectory.h5                   DROID sessions only: robot state +
+                                         actions (DROID format, written via
+                                         the droid package's own
+                                         TrajectoryWriter -- readable by
+                                         robo_dataset's DroidStore). Sim
+                                         sessions have no analog -- skipped.
+        <camera_key>.mp4                native camera resolution (envs hand
+                                         raw frames to the policy, which
+                                         resizes internally to its trained
+                                         shape -- see
+                                         rgrl.policies.base.ObsEncoder) --
+                                         one per recorded camera, CRF-18 H.264
         embeddings_<layer>.npz          (n_steps, *activation_shape) float32,
-                                        one file per --capture-layers entry
+                                         one file per capture_layers entry
         metadata.yaml                   index, length, success, note, args
 
 Usage::
@@ -29,9 +38,13 @@ Usage::
         --device cuda:0 --port 5001 --capture-layers enc
 
     # Robot workstation
-    uv run python -m rgrl.inference.collect_droid_rollouts \\
-        --server http://<gpu_box_ip>:5001 --output-dir data/rollouts/x \\
-        --num-episodes 20 --mode async_chunk --control-hz 15
+    uv run python -m rgrl.inference.collect_rollouts \\
+        server=http://<gpu_box_ip>:5001 output_dir=data/rollouts/x \\
+        num_episodes=20 mode=async_chunk control_hz=15
+
+    # Sim session instead of a real robot
+    uv run python -m rgrl.inference.collect_rollouts \\
+        ckpt=runs/lift_state/latest.pt rollout_env=robomimic output_dir=data/rollouts/sim
 
 Online activation capture is reliable in ``sync`` and ``async_chunk`` modes
 (policy.get() always completes before the env.step() calls that execute its
@@ -58,10 +71,13 @@ import threading
 import tty
 from pathlib import Path
 
+import hydra
 import numpy as np
+from hydra.utils import instantiate
+from omegaconf import DictConfig, OmegaConf
 
-from rgrl.inference.droid_env import DroidEnv, _import_droid_module
-from rgrl.inference.run_realtime import _build_policy
+from rgrl.inference.envs.droid import _DROID_HINT, DroidEnv
+from rgrl.inference.rollout_cli import build_policy, meta_from_policy
 from rgrl.inference.runner import InferenceMode, Runner
 
 log = logging.getLogger(__name__)
@@ -242,7 +258,10 @@ def _write_droid_trajectory(
     action groups) lives there, not reimplemented here, so the file is
     readable by robo_dataset's DroidStore exactly like a teleop session's."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    writer_mod = _import_droid_module("droid.trajectory_utils.trajectory_writer")
+    try:
+        import droid.trajectory_utils.trajectory_writer as writer_mod
+    except ImportError as e:
+        raise ImportError(f"importing 'droid.trajectory_utils.trajectory_writer' failed -- this {_DROID_HINT}") from e
     writer = writer_mod.TrajectoryWriter(
         str(path), metadata={"success": bool(success), "instruction": instruction}, save_images=False
     )
@@ -270,12 +289,11 @@ def _write_droid_trajectory(
     writer.close(metadata={"success": bool(success)})
 
 
-_CAMERA_KEYS = ("wrist_image_left", "wrist_image_right", "exterior_image_1_left", "exterior_image_2_left")
-
-
 def _save_episode(
     ep_dir: Path,
     episode_data: list[dict],
+    image_keys: list[str],
+    is_droid: bool,
     action_space: str,
     success: bool | None,
     note: str,
@@ -290,9 +308,15 @@ def _save_episode(
 ) -> None:
     import yaml
 
-    _write_droid_trajectory(ep_dir / "trajectory.h5", episode_data, action_space, success, instruction)
+    ep_dir.mkdir(parents=True, exist_ok=True)
 
-    camera_keys = [k for k in _CAMERA_KEYS if episode_data and k in episode_data[0]["obs"]]
+    # DROID's on-disk schema (robot_state/controller_info/action groups) has
+    # no sim-appropriate analog -- a sim session saves mp4s + metadata.yaml
+    # only, no trajectory file.
+    if is_droid:
+        _write_droid_trajectory(ep_dir / "trajectory.h5", episode_data, action_space, success, instruction)
+
+    camera_keys = [k for k in image_keys if episode_data and k in episode_data[0]["obs"]]
     for key in camera_keys:
         frames = [entry["obs"][key] for entry in episode_data]
         _write_mp4(ep_dir / f"{key}.mp4", frames, fps=control_hz)
@@ -324,60 +348,42 @@ def _save_episode(
         )
 
 
-@dataclasses.dataclass
-class _Args:
-    output_dir: str
-    ckpt: str | None = None
-    server: str | None = None
-    num_episodes: int = 10
-    instruction: str = ""
-    mode: str = "async_chunk"
-    open_loop_horizon: int = 8
-    replan_step: int = 0
-    rtc: bool = False
-    policy_hz: float | None = None
-    min_commit_steps: int = 0
-    max_timesteps: int = 600
-    control_hz: float = 15.0
-    action_space: str = "joint_velocity"
-    position_gain: float = 1.0
-    max_joint_velocity: float | None = None
-    device: str = "cuda:0"
-    compile: bool = True
-    capture_layers: tuple[str, ...] = ()
-    dry_run: bool = False
-
-
-def main() -> None:
-    import tyro
-
+@hydra.main(version_base=None, config_path="../../configs", config_name="collect_rollouts")
+def main(cfg: DictConfig) -> None:
     _save_terminal()
-    args = tyro.cli(_Args)
     logging.basicConfig(level=logging.INFO, format="[%(name)s] %(message)s")
+    if InferenceMode(cfg.mode) == InferenceMode.ASYNC_CHUNK and not cfg.rtc:
+        log.warning(
+            "mode=async_chunk without rtc=True: the new chunk doesn't condition on "
+            "the actions that execute during inference latency, so it can jump at "
+            "chunk boundaries -- pass rtc=true, or mode=sync"
+        )
+    if cfg.server is not None and cfg.server.startswith(("ws://", "wss://")):
+        raise ValueError("collect_rollouts.py records rgrl activations -- WebSocketPolicy (openpi) has none")
 
-    output_dir = Path(args.output_dir)
+    output_dir = Path(cfg.output_dir)
     recordings = output_dir / "recordings"
     recordings.mkdir(parents=True, exist_ok=True)
 
-    if args.server is not None:
-        if args.server.startswith(("ws://", "wss://")):
-            raise ValueError("collect_droid_rollouts.py records rgrl activations -- WebSocketPolicy (openpi) has none")
-        from rgrl.inference.policy_client import HttpPolicy
+    inference = None
+    if cfg.server is None and cfg.ckpt is not None:
+        # LocalPolicy path only -- see rollout_cli.build_policy docstring. Instantiating
+        # unconditionally drags torch (rgrl.eval_robomimic imports it) into the HttpPolicy
+        # path too, which breaks running this on a torch-free robot workstation.
+        inference = instantiate(cfg.inference)
+        inference = dataclasses.replace(
+            inference, warmup_batch_size=cfg.num_envs, capture_layers=list(cfg.capture_layers)
+        )
+    policy = build_policy(ckpt=cfg.ckpt, server=cfg.server, inference=inference, device=cfg.device)
+    build_env = instantiate(cfg.rollout_env)
+    env = build_env(policy, num_envs=cfg.num_envs, control_hz=cfg.control_hz)
+    is_droid = isinstance(env, DroidEnv)
+    image_keys = sorted(
+        k for k, v in meta_from_policy(policy)["shape_meta"]["obs"].items() if v.get("type") == "rgb"
+    )
+    recording_env = RecordingEnv(env, policy=policy if cfg.capture_layers else None)
 
-        policy = HttpPolicy(args.server)
-    else:
-        if args.ckpt is None:
-            raise ValueError("pass --server URL or --ckpt path")
-        from rgrl.inference.checkpoint import InferenceConfig
-        from rgrl.inference.policy_client import LocalPolicy
-
-        inference = InferenceConfig(compile=args.compile, capture_layers=list(args.capture_layers))
-        policy = LocalPolicy(args.ckpt, device=args.device, inference=inference)
-
-    env = DroidEnv(action_space=args.action_space, control_hz=args.control_hz, dry_run=args.dry_run)
-    recording_env = RecordingEnv(env, policy=policy if args.capture_layers else None)
-
-    if InferenceMode(args.mode) == InferenceMode.ASYNC_STREAMING and args.capture_layers:
+    if InferenceMode(cfg.mode) == InferenceMode.ASYNC_STREAMING and cfg.capture_layers:
         log.warning(
             "async_streaming: online activation capture can be misaligned with the "
             "executing chunk (see module docstring) -- re-extract offline if this matters"
@@ -386,22 +392,22 @@ def main() -> None:
     runner = Runner(
         env=recording_env,
         policy=policy,
-        mode=InferenceMode(args.mode),
-        control_hz=args.control_hz,
-        open_loop_horizon=args.open_loop_horizon,
-        max_timesteps=args.max_timesteps,
-        policy_hz=args.policy_hz,
-        min_commit_steps=args.min_commit_steps,
-        replan_step=args.replan_step,
-        rtc=args.rtc,
+        mode=InferenceMode(cfg.mode),
+        control_hz=cfg.control_hz,
+        open_loop_horizon=cfg.open_loop_horizon,
+        max_timesteps=cfg.max_timesteps,
+        policy_hz=cfg.policy_hz,
+        min_commit_steps=cfg.min_commit_steps,
+        replan_step=cfg.replan_step,
+        rtc=cfg.rtc,
     )
 
     use_tty = sys.stdin.isatty()
     successes = []
     ep = 0
-    while ep < args.num_episodes:
+    while ep < cfg.num_episodes:
         if use_tty:
-            _wait_for_space(f"\nepisode {ep:04d} / {args.num_episodes} — SPACE to start, q to quit")
+            _wait_for_space(f"\nepisode {ep:04d} / {cfg.num_episodes} — SPACE to start, q to quit")
 
         stop_event = threading.Event()
         listener = None
@@ -410,7 +416,7 @@ def main() -> None:
             listener = threading.Thread(target=_space_stop_listener, args=(stop_event,), daemon=True)
             listener.start()
 
-        record = runner.run_batch(instruction=args.instruction, stop_event=stop_event)
+        record = runner.run_batch(instruction=cfg.instruction, stop_event=stop_event)
         stop_event.set()
         if listener is not None:
             listener.join(timeout=0.3)
@@ -427,20 +433,23 @@ def main() -> None:
 
         ts = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
         ep_dir = recordings / f"ep_{ts}"
+        action_space = cfg.rollout_env.get("action_space", "joint_velocity")
         _save_episode(
             ep_dir,
             episode_data,
-            args.action_space,
+            image_keys,
+            is_droid,
+            action_space,
             success,
             note,
-            args.instruction,
-            args.control_hz,
-            args.capture_layers,
+            cfg.instruction,
+            cfg.control_hz,
+            cfg.capture_layers,
             record.n_steps,
             record.n_new_chunks,
             record.avg_chunk_latency_ms,
             ep,
-            dataclasses.asdict(args),
+            OmegaConf.to_container(cfg, resolve=True),
         )
         successes.append(success)
         log.info(

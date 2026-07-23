@@ -1,0 +1,4 @@
+_target_: rgrl.inference.envs.robomimic.build
+_partial_: true  # `policy` isn't known until the CLI loads/connects to one
+num_envs: 1
+seed: 0

@@ -4,7 +4,12 @@ horizon: 16
 n_action_steps: 8
 down_dims: [256, 512, 1024]
 num_kp: 32
-image_hw: [76, 76]
+data_transforms:
+  - _target_: rgrl.transforms.CropTransform
+    _partial_: true  # image_keys, unknown until the store loads, is bound by ObsEncoder
+    size: [76, 76]  # vision encoder's input size
+    pad: 0
+    per_timestep: true
 inference_steps: 10
 timestep_scale: 1000.0
 # train-time RTC (0 = off) -- same knobs as policy/diffusion.yaml
