@@ -11,8 +11,12 @@ concurrent resets safe), mirroring how diffusion_policy ships seeds to its
 workers.
 
 Built from plain env_meta/image_keys/state_keys/action_dim — not a full
-EpisodeStore — so this module needs only robomimic/robosuite/mujoco (in the
-workers), never torch or rgrl.data. A remote policy server's /meta response
+EpisodeStore — so this module needs only robosuite/mujoco (in the workers),
+never robomimic, torch, or rgrl.data. The input metadata and HDF5 convention
+are Robomimic-compatible, but the simulator adapter deliberately talks to
+modern Robosuite directly: Robomimic 0.3's environment wrapper still imports
+the retired ``mujoco_py`` module even when Robosuite is using modern MuJoCo.
+A remote policy server's /meta response
 (rgrl/inference/policy_server.py) carries exactly this information, so an
 env-only process never needs to load the store itself.
 
@@ -24,72 +28,143 @@ like rgrl.transforms.data_transforms_pipeline's image_keys binding.
 
 from __future__ import annotations
 
+import copy
 import multiprocessing as mp
+
 import numpy as np
+
+
+def _env_kwargs(
+    env_meta: dict,
+    image_keys: list[str],
+    image_hw,
+    abs_action: bool,
+) -> dict:
+    """Resolve recorded metadata into explicit modern-Robosuite kwargs."""
+    if int(env_meta.get("type", 1)) != 1:
+        raise ValueError(
+            f"RobomimicSimEnv only supports Robosuite metadata (type=1), "
+            f"got type={env_meta.get('type')!r}"
+        )
+
+    kwargs = copy.deepcopy(env_meta["env_kwargs"])
+    kwargs.update(
+        has_renderer=False,
+        has_offscreen_renderer=bool(image_keys),
+        ignore_done=True,
+        use_object_obs=True,
+        use_camera_obs=bool(image_keys),
+        camera_depths=False,
+    )
+    # A recorded EGL index describes the machine that produced the dataset,
+    # not the machine running this process.
+    kwargs.pop("render_gpu_device_id", None)
+    if image_keys:
+        if image_hw is None:
+            raise ValueError("image_hw is required when image observations are requested")
+        h, w = image_hw
+        kwargs.update(
+            camera_names=[key.removesuffix("_image") for key in image_keys],
+            camera_heights=h,
+            camera_widths=w,
+        )
+        # Match Robosuite's recommended EGL device selection while keeping the
+        # dependency optional for CPU/on-screen use.
+        try:
+            import egl_probe
+
+            devices = egl_probe.get_available_devices()
+            if devices:
+                kwargs["render_gpu_device_id"] = devices[0]
+        except ImportError:
+            pass
+    if abs_action:
+        kwargs["controller_configs"]["control_delta"] = False
+    return kwargs
+
+
+def _make_env(env_meta: dict, image_keys: list[str], image_hw, abs_action: bool):
+    """Build a modern Robosuite 1.x env without Robomimic's legacy wrapper."""
+    import robosuite
+
+    kwargs = _env_kwargs(env_meta, image_keys, image_hw, abs_action)
+    env = robosuite.make(env_meta["env_name"], **kwargs)
+    env.hard_reset = False
+    # Robomimic's old wrapper explicitly enabled these Robosuite observables.
+    # Preserve that behavior for datasets that request either family of key.
+    for obs_name in env.observation_names:
+        if "joint_pos" in obs_name or "eef_vel" in obs_name:
+            env.modify_observable(
+                observable_name=obs_name,
+                attribute="active",
+                modifier=True,
+            )
+    return env
+
+
+def _frame(
+    raw: dict,
+    image_keys: list[str],
+    state_keys: list[str],
+) -> dict[str, np.ndarray]:
+    """Translate native Robosuite observations to the repository convention."""
+    out: dict[str, np.ndarray] = {}
+    for key in state_keys:
+        # Robomimic HDF5 calls this concatenated observation `object`; native
+        # Robosuite calls it `object-state`. Robot proprio keys are unchanged.
+        source_key = "object-state" if key == "object" else key
+        out[key] = np.asarray(raw[source_key], dtype=np.float32)
+    for key in image_keys:
+        # Native Robosuite camera observations are HWC uint8 and vertically
+        # inverted. Robomimic's wrapper flipped them before returning; retain
+        # that dataset-facing convention without its float/CHW round trip.
+        out[key] = np.ascontiguousarray(np.asarray(raw[key])[::-1], dtype=np.uint8)
+    return out
+
+
+def _task_success(env) -> bool:
+    success = env._check_success()
+    if isinstance(success, dict):
+        if "task" not in success:
+            raise KeyError("Robosuite success mapping must contain a 'task' key")
+        success = success["task"]
+    return bool(success)
 
 
 def _worker(conn, env_meta: dict, image_keys: list[str], state_keys: list[str], image_hw) -> None:
     """One robosuite instance, driven over a Pipe: ("reset", seed) ->
     obs_frame; ("step", action) -> (obs_frame, success); ("close", None)."""
     import os
-    import sys
-    import types
 
     os.environ.setdefault("MUJOCO_GL", "egl")  # headless rendering; must precede mujoco import
-    # robomimic 0.3 hard-imports mujoco_py; robosuite 1.4 uses the mujoco bindings instead
-    sys.modules.setdefault(
-        "mujoco_py", types.SimpleNamespace(builder=types.SimpleNamespace(MujocoException=Exception))
-    )
-    import robomimic.utils.env_utils as EnvUtils
-    import robomimic.utils.obs_utils as ObsUtils
 
     from rgrl.inference.action_transforms import undo_abs_rotation_action
 
-    ObsUtils.initialize_obs_utils_with_obs_specs(
-        {"obs": {"low_dim": state_keys, "rgb": image_keys}}
-    )
-    if image_keys and image_hw is not None:
-        h, w = image_hw
-        env_meta["env_kwargs"].update(
-            camera_names=[k.removesuffix("_image") for k in image_keys],
-            camera_heights=h,
-            camera_widths=w,
-        )
     # A policy trained against an abs_action store outputs pos+rotation_6d+
     # gripper per arm; the controller needs pos+axis_angle+gripper and needs
     # to be told the pose is absolute, not a delta (see action_transforms.py).
     abs_action = bool(env_meta.get("abs_action", False))
-    if abs_action:
-        env_meta["env_kwargs"]["controller_configs"]["control_delta"] = False
-    env = EnvUtils.create_env_from_metadata(
-        env_meta=env_meta,
-        render=False,
-        render_offscreen=bool(image_keys),
-        use_image_obs=bool(image_keys),
-    )
-    env.env.hard_reset = False  # robosuite hard resets are slow and leak memory
-
-    def frame(raw: dict) -> dict[str, np.ndarray]:
-        out = {k: raw[k].astype(np.float32) for k in state_keys}
-        for k in image_keys:
-            # robomimic returns processed CHW float in [0,1]; store convention is uint8 HWC
-            out[k] = (np.moveaxis(raw[k], 0, -1) * 255).round().astype(np.uint8)
-        return out
+    env = _make_env(env_meta, image_keys, image_hw, abs_action)
 
     try:
         while True:
             cmd, arg = conn.recv()
             if cmd == "reset":
                 np.random.seed(arg)  # robosuite resets use the global numpy RNG (of THIS process)
-                conn.send(frame(env.reset()))
+                conn.send(_frame(env.reset(), image_keys, state_keys))
             elif cmd == "step":
                 step_action = undo_abs_rotation_action(arg) if abs_action else arg
                 raw, _, _, _ = env.step(step_action)
-                conn.send((frame(raw), bool(env.is_success()["task"])))
+                conn.send(
+                    (
+                        _frame(raw, image_keys, state_keys),
+                        _task_success(env),
+                    )
+                )
             elif cmd == "close":
                 break
     finally:
-        env.env.close()
+        env.close()
         conn.close()
 
 

@@ -1,0 +1,6 @@
+_target_: rgrl.eval_robomimic.InferenceConfig
+sampler: null
+inference_steps: null
+compile: true
+bf16: false
+use_ema: true

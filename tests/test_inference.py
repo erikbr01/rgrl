@@ -8,6 +8,7 @@ import torch
 from torch import nn
 
 from rgrl.inference.activations import ActivationCapture
+from rgrl.inference.envs.robomimic import _env_kwargs, _frame, _task_success
 from rgrl.inference.obs_window import RollingObsWindow
 from rgrl.inference.policy_client import HttpPolicy, LocalPolicy, PolicyBase, WebSocketPolicy
 from rgrl.inference.rollout_cli import build_policy
@@ -25,6 +26,69 @@ def test_wire_roundtrip():
     for k in arrays:
         np.testing.assert_array_equal(decoded[k], arrays[k])
         assert decoded[k].dtype == arrays[k].dtype
+
+
+def test_robosuite_frame_uses_dataset_key_names_and_camera_orientation():
+    image = np.arange(2 * 3 * 3, dtype=np.uint8).reshape(2, 3, 3)
+    raw = {
+        "object-state": np.array([1.0, 2.0], dtype=np.float64),
+        "robot0_eef_pos": np.array([3.0, 4.0, 5.0], dtype=np.float64),
+        "sideview_image": image,
+    }
+    frame = _frame(
+        raw,
+        image_keys=["sideview_image"],
+        state_keys=["object", "robot0_eef_pos"],
+    )
+
+    np.testing.assert_array_equal(frame["object"], [1.0, 2.0])
+    np.testing.assert_array_equal(frame["robot0_eef_pos"], [3.0, 4.0, 5.0])
+    np.testing.assert_array_equal(frame["sideview_image"], image[::-1])
+    assert frame["object"].dtype == np.float32
+    assert frame["sideview_image"].dtype == np.uint8
+    assert frame["sideview_image"].flags.c_contiguous
+
+
+def test_robosuite_kwargs_are_host_local_and_do_not_mutate_metadata(monkeypatch):
+    class EglProbe:
+        @staticmethod
+        def get_available_devices():
+            return [3]
+
+    monkeypatch.setitem(__import__("sys").modules, "egl_probe", EglProbe)
+    env_meta = {
+        "type": 1,
+        "env_kwargs": {
+            "render_gpu_device_id": 7,
+            "controller_configs": {"control_delta": True},
+        },
+    }
+    kwargs = _env_kwargs(
+        env_meta,
+        image_keys=["sideview_image"],
+        image_hw=(84, 96),
+        abs_action=True,
+    )
+
+    assert kwargs["render_gpu_device_id"] == 3
+    assert kwargs["camera_names"] == ["sideview"]
+    assert kwargs["camera_heights"] == 84
+    assert kwargs["camera_widths"] == 96
+    assert kwargs["controller_configs"]["control_delta"] is False
+    assert env_meta["env_kwargs"]["render_gpu_device_id"] == 7
+    assert env_meta["env_kwargs"]["controller_configs"]["control_delta"] is True
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [(True, True), (False, False), ({"task": True, "stage": False}, True)],
+)
+def test_robosuite_task_success_accepts_native_result_shapes(value, expected):
+    class Env:
+        def _check_success(self):
+            return value
+
+    assert _task_success(Env()) is expected
 
 
 def test_rolling_obs_window_front_fills_and_stacks():

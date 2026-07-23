@@ -3,6 +3,8 @@
 import numpy as np
 import pytest
 import torch
+from torch import nn
+from types import SimpleNamespace
 
 from robo_dataset.backends.zarr_backend import ZarrStoreWriter
 from robo_dataset.normalization import fit_key
@@ -11,10 +13,19 @@ from robo_dataset.transforms.gpu_batch import CenterCrop, RandomCrop
 from rgrl.dataset import CpuSequenceDataset, GpuSequenceDataset, Windows, build_dataset
 from rgrl.nets.unet1d import ConditionalUnet1D
 from rgrl.normalize import Normalizer
+from rgrl.policies.base import ObsEncoder
 from rgrl.policies.diffusion import DiffusionPolicy
 from rgrl.policies.dit_flow import DiTFlowPolicy
 from rgrl.policies.flow import FlowPolicy
-from rgrl.store import EpisodeStore, write_sidecars
+from rgrl.store import EpisodeStore, KeySpec, write_sidecars
+from rgrl.train_loop import TrainConfig, seed_everything, train
+from rgrl.transforms import (
+    CropTransform,
+    DataPipeline,
+    ImagePreprocessTransform,
+    ImageToTensorTransform,
+    ResizeTransform,
+)
 
 
 @pytest.fixture
@@ -174,6 +185,38 @@ def test_build_dataset_picks_cpu_dataset_past_the_gb_threshold_on_cuda():
         assert isinstance(over, CpuSequenceDataset)
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+def test_side_stream_prefetch_records_main_stream_lifetime():
+    from robo_dataset.prefetch import DataPrefetcher
+
+    class Source(torch.utils.data.Dataset):
+        def __len__(self):
+            return 128
+
+        def __getitem__(self, index):
+            return {"value": torch.full((4096,), float(index))}
+
+    loader = torch.utils.data.DataLoader(
+        Source(),
+        batch_size=1,
+        pin_memory=True,
+        num_workers=0,
+    )
+    prefetch = DataPrefetcher(loader, device=torch.device("cuda"))
+    assert prefetch.strategy == "stream"
+
+    results = []
+    for index, batch in enumerate(prefetch):
+        # Queue use on the main stream, then let the generator advance and
+        # release/reuse prior side-stream allocations before synchronizing.
+        results.append((batch["value"] * 3).sum())
+        torch.empty_like(batch["value"])
+        assert index < len(loader)
+    actual = torch.stack(results).cpu()
+    expected = torch.arange(128, dtype=torch.float32) * (4096 * 3)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
 def test_epoch_perm_reproducible(tiny_store):
     ds = GpuSequenceDataset(tiny_store, Windows(2, 4), torch.device("cpu"))
     assert torch.equal(ds.epoch_perm(1, 5), ds.epoch_perm(1, 5))
@@ -262,6 +305,110 @@ def test_crops():
     out1 = cc5({"img": x})["img"]
     out2 = cc5({"img": x})["img"]
     assert torch.equal(out1, out2)  # deterministic
+
+
+def test_uint8_first_image_preprocess_matches_float_first_pipeline():
+    image = torch.arange(3 * 2 * 8 * 8 * 3, dtype=torch.int64)
+    image = image.remainder(256).to(torch.uint8).reshape(3, 2, 8, 8, 3)
+    old = DataPipeline(
+        [
+            ImageToTensorTransform(["img"]),
+            ResizeTransform(["img"], size=(8, 8)),
+            CropTransform(["img"], size=(5, 5), pad=0, per_timestep=True),
+        ]
+    )
+    new = ImagePreprocessTransform(
+        ["img"],
+        native_hw=(8, 8),
+        crop=CropTransform(["img"], size=(5, 5), pad=0, per_timestep=True),
+    )
+
+    old.train()
+    new.train()
+    torch.manual_seed(11)
+    expected = old({"img": image})["img"]
+    torch.manual_seed(11)
+    actual = new({"img": image})["img"]
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+    old.eval()
+    new.eval()
+    expected = old({"img": image})["img"]
+    actual = new({"img": image})["img"]
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+    # Non-native live input takes the resize-first compatibility path.
+    live = torch.randint(0, 256, (2, 2, 10, 10, 3), dtype=torch.uint8)
+    old_live = DataPipeline(
+        [
+            ImageToTensorTransform(["img"]),
+            ResizeTransform(["img"], size=(8, 8)),
+            CropTransform(["img"], size=(5, 5), pad=0, per_timestep=True),
+        ]
+    ).eval()
+    new_live = ImagePreprocessTransform(
+        ["img"],
+        native_hw=(8, 8),
+        crop=CropTransform(["img"], size=(5, 5), pad=0, per_timestep=True),
+    ).eval()
+    torch.testing.assert_close(
+        new_live({"img": live})["img"],
+        old_live({"img": live})["img"],
+        rtol=0,
+        atol=0,
+    )
+
+
+def _multicamera_store_metadata(tiny_store):
+    keys = {
+        "state": tiny_store.meta.keys["state"],
+        "camera.left": KeySpec([32, 32, 3], "uint8", "image"),
+        "camera.right": KeySpec([32, 32, 3], "uint8", "image"),
+    }
+    return SimpleNamespace(
+        meta=SimpleNamespace(keys=keys),
+        stats={"state": tiny_store.stats["state"]},
+    )
+
+
+def test_shared_image_encoder_is_opt_in_and_shape_compatible(tiny_store):
+    store = _multicamera_store_metadata(tiny_store)
+    separate = ObsEncoder(
+        store, obs_horizon=2, target_hw=(32, 32), num_kp=4,
+        share_image_encoder=False,
+    )
+    shared = ObsEncoder(
+        store, obs_horizon=2, target_hw=(32, 32), num_kp=4,
+        share_image_encoder=True,
+    )
+    batch = {
+        "state": torch.randn(2, 2, 3),
+        "camera.left": torch.rand(2, 2, 3, 32, 32),
+        "camera.right": torch.rand(2, 2, 3, 32, 32),
+    }
+    assert separate(batch).shape == shared(batch).shape == (2, separate.out_dim)
+    assert sum(p.numel() for p in shared.parameters()) < sum(
+        p.numel() for p in separate.parameters()
+    )
+    assert not any(key.startswith("shared_encoder.") for key in separate.state_dict())
+    assert any(key.startswith("shared_encoder.") for key in shared.state_dict())
+
+
+def test_observation_module_name_collisions_fail_fast(tiny_store):
+    store = SimpleNamespace(
+        meta=SimpleNamespace(
+            keys={
+                "joint.position": tiny_store.meta.keys["state"],
+                "joint_position": tiny_store.meta.keys["state"],
+            }
+        ),
+        stats={
+            "joint.position": tiny_store.stats["state"],
+            "joint_position": tiny_store.stats["state"],
+        },
+    )
+    with pytest.raises(ValueError, match="collide"):
+        ObsEncoder(store, obs_horizon=2)
 
 
 def test_unet_shapes():
@@ -420,3 +567,182 @@ def test_rtc_matches_plain_predict_shapes(tiny_store):
     action = policy.predict_action({"state": torch.randn(3, 2, 3)})
     assert action.shape == (3, 2, 2)
     assert torch.isfinite(action).all()
+
+
+class _TinyRandomLossPolicy(nn.Module):
+    """Small trainer fixture whose loss consumes Torch RNG like flow matching."""
+
+    def __init__(self):
+        super().__init__()
+        self.cfg = SimpleNamespace(obs_horizon=2, horizon=4)
+        self.net = nn.Linear(2 * 3, 4 * 2)
+        self.data_transforms_pipeline = None
+
+    def compute_loss(self, batch):
+        prediction = self.net(batch["state"].flatten(1)).reshape(-1, 4, 2)
+        target = batch["action"] + 0.1 * torch.randn_like(batch["action"])
+        return (prediction - target).square().mean()
+
+    def loss(self, batch):
+        return self.compute_loss(batch)
+
+
+def _tiny_train_cfg(out, **overrides):
+    values = {
+        "out": out,
+        "steps": 6,
+        "batch_size": 4,
+        "lr": 1e-3,
+        "warmup_steps": 1,
+        "seed": 123,
+        "val_seed": 456,
+        "val_episodes": 1,
+        "val_every": 2,
+        "log_every": 100,
+        "save_every": 3,
+        "resume": "auto",
+        "compile": False,
+        "bf16": False,
+        "device": "cpu",
+        "profile": False,
+    }
+    values.update(overrides)
+    return TrainConfig(**values)
+
+
+def _train_tiny(tiny_store, cfg):
+    seed_everything(cfg.seed)
+    policy = _TinyRandomLossPolicy()
+    path = train(
+        cfg,
+        policy,
+        tiny_store,
+        {"_target_": "tests._TinyRandomLossPolicy"},
+        {"name": "tiny"},
+        {"obs": {"state": {"shape": [3]}}, "action": {"shape": [2]}},
+        {"kind": "uniform", "weights_path": None, "replacement": False},
+    )
+    return torch.load(path, map_location="cpu", weights_only=False)
+
+
+def _assert_nested_equal(left, right):
+    if isinstance(left, torch.Tensor):
+        torch.testing.assert_close(left, right, rtol=0, atol=0)
+    elif isinstance(left, np.ndarray):
+        np.testing.assert_array_equal(left, right)
+    elif isinstance(left, dict):
+        assert left.keys() == right.keys()
+        for key in left:
+            _assert_nested_equal(left[key], right[key])
+    elif isinstance(left, (list, tuple)):
+        assert len(left) == len(right)
+        for a, b in zip(left, right, strict=True):
+            _assert_nested_equal(a, b)
+    else:
+        assert left == right
+
+
+def test_seed_everything_controls_policy_initialization():
+    seed_everything(9)
+    first = _TinyRandomLossPolicy()
+    seed_everything(9)
+    second = _TinyRandomLossPolicy()
+    for a, b in zip(first.parameters(), second.parameters(), strict=True):
+        torch.testing.assert_close(a, b, rtol=0, atol=0)
+
+
+def test_cpu_and_resident_batch_sequences_resume_exactly(tiny_store):
+    windows = Windows(2, 4)
+    resident = GpuSequenceDataset(tiny_store, windows, torch.device("cpu"))
+    cpu = CpuSequenceDataset(tiny_store, windows, torch.device("cpu"), num_workers=0)
+
+    resident_batches = resident.batches(4, seed=7)
+    cpu_batches = cpu.batches(4, seed=7)
+    expected = []
+    for _ in range(5):
+        resident_batch = next(resident_batches)
+        cpu_batch = next(cpu_batches)
+        torch.testing.assert_close(resident_batch["state"], cpu_batch["state"], rtol=0, atol=0)
+        torch.testing.assert_close(resident_batch["action"], cpu_batch["action"], rtol=0, atol=0)
+        expected.append(resident_batch)
+
+    resumed_resident = next(resident.batches(4, seed=7, start_batch=3))
+    resumed_cpu = next(cpu.batches(4, seed=7, start_batch=3))
+    torch.testing.assert_close(resumed_resident["state"], expected[3]["state"], rtol=0, atol=0)
+    torch.testing.assert_close(resumed_cpu["state"], expected[3]["state"], rtol=0, atol=0)
+
+
+def test_tiny_or_invalid_splits_fail_instead_of_hanging(tiny_store):
+    with pytest.raises(ValueError, match="val_episodes"):
+        GpuSequenceDataset(
+            tiny_store,
+            Windows(2, 4),
+            torch.device("cpu"),
+            val_episodes=tiny_store.meta.num_episodes,
+        )
+    ds = GpuSequenceDataset(tiny_store, Windows(2, 4), torch.device("cpu"))
+    with pytest.raises(ValueError, match="needs at least"):
+        next(ds.batches(ds.num_samples + 1, seed=0))
+
+
+def test_validation_frequency_does_not_change_training_rng(tiny_store, tmp_path):
+    with_validation = _train_tiny(
+        tiny_store, _tiny_train_cfg(tmp_path / "with_validation", val_every=2)
+    )
+    without_validation = _train_tiny(
+        tiny_store, _tiny_train_cfg(tmp_path / "without_validation", val_every=1000)
+    )
+    _assert_nested_equal(with_validation["model"], without_validation["model"])
+    _assert_nested_equal(with_validation["ema"], without_validation["ema"])
+    _assert_nested_equal(with_validation["optimizer"], without_validation["optimizer"])
+    _assert_nested_equal(with_validation["rng"], without_validation["rng"])
+
+
+def test_interrupted_resume_is_bit_exact(tiny_store, tmp_path, monkeypatch):
+    import rgrl.train_loop as train_loop
+
+    uninterrupted = _train_tiny(tiny_store, _tiny_train_cfg(tmp_path / "uninterrupted"))
+
+    original_save = train_loop._atomic_save_checkpoint
+
+    class SimulatedCrash(RuntimeError):
+        pass
+
+    def save_then_crash(out, step, payload):
+        path = original_save(out, step, payload)
+        if step == 3:
+            raise SimulatedCrash("injected immediately after durable checkpoint")
+        return path
+
+    monkeypatch.setattr(train_loop, "_atomic_save_checkpoint", save_then_crash)
+    interrupted_cfg = _tiny_train_cfg(tmp_path / "interrupted")
+    with pytest.raises(SimulatedCrash):
+        _train_tiny(tiny_store, interrupted_cfg)
+    monkeypatch.setattr(train_loop, "_atomic_save_checkpoint", original_save)
+
+    resumed = _train_tiny(tiny_store, interrupted_cfg)
+    for key in ("model", "ema", "optimizer", "scheduler", "rng"):
+        _assert_nested_equal(uninterrupted[key], resumed[key])
+    assert resumed["step"] == uninterrupted["step"] == 6
+    assert (tmp_path / "interrupted" / "latest.pt").is_symlink()
+    assert not list((tmp_path / "interrupted").glob(".*.tmp"))
+
+
+def test_completed_and_incompatible_resumes_are_guarded(tiny_store, tmp_path):
+    out = tmp_path / "guarded"
+    cfg = _tiny_train_cfg(out, steps=2, save_every=2)
+    completed = _train_tiny(tiny_store, cfg)
+    latest = out / "latest.pt"
+    checkpoint = latest.resolve()
+    before = (latest.lstat().st_mtime_ns, checkpoint.stat().st_mtime_ns)
+
+    completed_again = _train_tiny(tiny_store, cfg)
+    assert completed_again["step"] == completed["step"] == 2
+    assert before == (latest.lstat().st_mtime_ns, checkpoint.stat().st_mtime_ns)
+
+    with pytest.raises(RuntimeError, match="beyond requested target"):
+        _train_tiny(tiny_store, _tiny_train_cfg(out, steps=1))
+    with pytest.raises(RuntimeError, match="fingerprint mismatch"):
+        _train_tiny(tiny_store, _tiny_train_cfg(out, steps=2, lr=2e-3))
+    with pytest.raises(RuntimeError, match="fingerprint mismatch"):
+        _train_tiny(tiny_store, _tiny_train_cfg(out, steps=2, warmup_steps=0))

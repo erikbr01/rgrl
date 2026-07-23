@@ -11,6 +11,10 @@ depth: 8
 num_heads: 8
 mlp_ratio: 4.0
 num_kp: 32
+# Opt-in modeling change: share one vision backbone across camera keys.
+# This reduces parameters/optimizer state, but is not checkpoint-compatible
+# with the default per-camera encoders and should be ablated before rollout.
+share_image_encoder: false
 data_transforms:
   - _target_: rgrl.transforms.CropTransform
     _partial_: true  # image_keys, unknown until the store loads, is bound by ObsEncoder

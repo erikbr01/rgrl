@@ -4,6 +4,7 @@ instead of silently deleting or reconverting)."""
 
 import copy
 import json
+from pathlib import Path
 
 import h5py
 import numpy as np
@@ -109,6 +110,31 @@ def test_incomplete_cache_raises_without_deleting(synthetic_hdf5, tmp_path):
     assert not stats_path.exists()  # not silently regenerated
 
 
+def test_failed_conversion_never_publishes_a_partial_cache(
+    synthetic_hdf5, tmp_path, monkeypatch
+):
+    import rgrl.data as data_module
+
+    source_cfg = _source_cfg(synthetic_hdf5)
+    cache_root = tmp_path / "cache"
+    original_convert = data_module._convert
+
+    def fail_after_partial_write(source, target, out):
+        out.mkdir(parents=True)
+        (out / "partial").write_text("injected")
+        raise RuntimeError("injected conversion failure")
+
+    monkeypatch.setattr(data_module, "_convert", fail_after_partial_write)
+    with pytest.raises(RuntimeError, match="injected"):
+        load_store(source_cfg, source_cfg["shape_meta"], cache_root=cache_root)
+    assert not [path for path in cache_root.iterdir() if path.is_dir()]
+    assert not list(cache_root.glob("*.tmp"))
+
+    monkeypatch.setattr(data_module, "_convert", original_convert)
+    store = load_store(source_cfg, source_cfg["shape_meta"], cache_root=cache_root)
+    assert store.meta.num_frames == 9
+
+
 @pytest.fixture
 def synthetic_store(tmp_path):
     """A minimal robo_dataset zarr store on disk (2 episodes, one lowdim
@@ -187,6 +213,56 @@ def test_sample_weights_path_does_not_bust_cache(synthetic_store, tmp_path):
     assert manifest.stat().st_mtime_ns == mtime_before  # no reconversion triggered
 
 
+def test_selection_manifest_parent_additions_resolve_to_zero_copy_view(
+    synthetic_store, tmp_path
+):
+    selection_dir = tmp_path / "selections"
+    selection_dir.mkdir()
+    (selection_dir / "base.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "name": "base",
+                "source": {"dataset_id": "synthetic"},
+                "ordering": "preserve",
+                "count": 1,
+                "episode_ids": [1],
+            }
+        )
+    )
+    child_path = selection_dir / "child.json"
+    child_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "name": "child",
+                "source": {"dataset_id": "synthetic"},
+                "parent": "base.json",
+                "ordering": "preserve",
+                "count": 2,
+                "add_episode_ids": [0],
+            }
+        )
+    )
+    source_cfg = _zarr_store_source_cfg(synthetic_store)
+    source_cfg["dataset_id"] = "synthetic"
+    source_cfg["selection_path"] = str(child_path)
+
+    store = load_store(source_cfg, source_cfg["shape_meta"], cache_root=tmp_path / "cache")
+    assert store.episode_ids == (1, 0)
+    assert store.meta.num_episodes == 2
+    assert (store.path / "data").is_symlink()
+
+    from robo_dataset.store_factory import open_store
+
+    source = open_store(synthetic_store)
+    first_length = source.episode_length(1)
+    np.testing.assert_array_equal(
+        store.load("state")[:first_length],
+        source.get_frames(1, "state", 0, first_length),
+    )
+
+
 @pytest.fixture
 def video_store_path(tmp_path):
     """A small robo_dataset VideoStore (4 episodes, one image key, one
@@ -259,6 +335,13 @@ def test_episode_ids_selects_and_reindexes_a_reproducible_subset(video_store_pat
     store = load_store(source_cfg, source_cfg["shape_meta"], cache_root=tmp_path / "cache")
     assert store.meta.num_episodes == len(episode_ids)
     assert store.meta.num_frames == sum(src.episode_length(i) for i in episode_ids)
+    # Selection is metadata-only: the cache points at the original physical
+    # store and carries a logical episode mapping, with no re-encoded videos.
+    assert (store.path / "videos").is_symlink()
+    assert (store.path / "data").is_symlink()
+    view_doc = json.loads((store.path / "episode_view.json").read_text())
+    assert view_doc["episode_ids"] == episode_ids
+    assert (store.path / "videos").resolve() == (Path(video_store_path) / "videos").resolve()
 
     # dst episode 0 must be src episode 2's data (order preserved, not sorted)
     src_ep0_len = src.episode_length(2)
@@ -280,4 +363,14 @@ def test_episode_ids_selects_and_reindexes_a_reproducible_subset(video_store_pat
 def test_episode_ids_out_of_range_raises(video_store_path, tmp_path):
     source_cfg = _video_store_source_cfg(video_store_path, episode_ids=[0, 99])
     with pytest.raises(ValueError, match="out of range"):
+        load_store(source_cfg, source_cfg["shape_meta"], cache_root=tmp_path / "cache")
+
+
+@pytest.mark.parametrize(
+    ("episode_ids", "message"),
+    [([], "at least one"), ([0, 0], "unique"), ([0, 1.5], "integers")],
+)
+def test_episode_ids_are_validated(video_store_path, tmp_path, episode_ids, message):
+    source_cfg = _video_store_source_cfg(video_store_path, episode_ids=episode_ids)
+    with pytest.raises((TypeError, ValueError), match=message):
         load_store(source_cfg, source_cfg["shape_meta"], cache_root=tmp_path / "cache")

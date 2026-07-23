@@ -5,27 +5,12 @@ name: set_table_plusright
 # middle) -- policy_graphs' generate_set_table_episode_selection.py
 # (--seed 42) guarantees the baseline's indices are a strict subset of
 # this split's, matching diffusion_policy's set_table_v2_plusright config.
-# Merged and sorted into a flat list (see configs/data/set_table_baseline.yaml).
+# The manifest stores only the 60 additions and inherits the baseline.
 store_path: /mnt/ssdB/erik/droid_converted_v2_trimmed
+dataset_id: droid_v2_trimmed
 abs_action: false
 rename: {}
-episode_ids:
-  [
-    579, 580, 582, 586, 590, 591, 592, 593, 594, 595, 596, 599, 600, 602,
-    604, 605, 606, 608, 613, 614, 617, 622, 623, 624, 626, 628, 629, 630,
-    631, 634, 635, 636, 637, 638, 639, 641, 642, 643, 647, 650, 652, 653,
-    655, 658, 659, 664, 666, 669, 671, 672, 673, 675, 676, 680, 683, 687,
-    688, 691, 694, 695, 696, 697, 698, 700, 702, 704, 705, 707, 708, 714,
-    715, 716, 718, 719, 723, 725, 726, 728, 730, 733, 734, 737, 744, 746,
-    751, 753, 756, 760, 761, 762, 763, 765, 766, 767, 768, 770, 771, 772,
-    774, 776, 778, 779, 780, 781, 783, 787, 791, 793, 795, 800, 802, 804,
-    806, 807, 808, 810, 811, 812, 813, 816, 818, 819, 825, 826, 828, 832,
-    833, 834, 836, 837, 838, 840, 843, 844, 848, 849, 854, 855, 860, 861,
-    863, 867, 870, 873, 877, 878, 879, 1105, 1107, 1110, 1112, 1117, 1118,
-    1119, 1121, 1122, 1123, 1125, 1128, 1129, 1130, 1131, 1132, 1133, 1134,
-    1135, 1136, 1137, 1138, 1139, 1141, 1142, 1143, 1144, 1145, 1147, 1148,
-    1150, 1151, 1153,
-  ]
+selection_path: configs/selections/set_table_plusright.json
 shape_meta:
   obs:
     wrist_image_left:

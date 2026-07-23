@@ -1,8 +1,8 @@
 """Load a trained policy checkpoint — no env or training-data dependency at all.
 
-Moved out of rgrl/eval_robomimic.py (which imports robomimic/robosuite at
-module level) so a policy-serving process (rgrl/inference/policy_server.py)
-never has to install them: this module only needs torch and hydra.
+Moved out of rgrl/eval_robomimic.py so a policy-serving process
+(rgrl/inference/policy_server.py) never has to install Robosuite or MuJoCo:
+this module only needs torch and hydra.
 rgrl/eval_robomimic.py re-imports InferenceConfig and load_policy from here
 for backward compatibility (configs/inference/*.yaml's
 _target_: rgrl.eval_robomimic.InferenceConfig keeps resolving unchanged).

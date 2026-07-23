@@ -29,6 +29,7 @@ class FlowConfig:
     n_action_steps: int = 8
     down_dims: tuple[int, ...] = (256, 512, 1024)
     num_kp: int = 32
+    share_image_encoder: bool = False
     # See DiffusionConfig.data_transforms -- same scheme.
     data_transforms: list[Callable] = field(default_factory=default_transforms)
     inference_steps: int = 10
@@ -48,7 +49,13 @@ class FlowPolicy(nn.Module):
         self.cfg = FlowConfig(**kwargs)
         cfg = self.cfg
         self.data_transforms_pipeline, target_hw = data_transforms_pipeline(store, cfg.data_transforms)
-        self.enc = ObsEncoder(store, cfg.obs_horizon, target_hw, num_kp=cfg.num_kp)
+        self.enc = ObsEncoder(
+            store,
+            cfg.obs_horizon,
+            target_hw,
+            num_kp=cfg.num_kp,
+            share_image_encoder=cfg.share_image_encoder,
+        )
         self.act_dim = store.meta.keys["action"].shape[0]
         self.action_norm = Normalizer(KeyNormalizer.from_dict(store.stats["action"]))
         # +1 input channel when trained for RTC (the prefix mask), exactly as
@@ -69,7 +76,12 @@ class FlowPolicy(nn.Module):
         mask = (pos >= start) & (pos < start + delay[:, None])
         return mask[:, :, None]
 
+    def loss(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
+        """Training entry point over a raw dataset batch."""
+        return self.compute_loss(apply_pipeline(self.data_transforms_pipeline, batch))
+
     def compute_loss(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
+        """Backward-compatible loss over an already-preprocessed batch."""
         cfg = self.cfg
         cond = self.enc(batch)
         actions = self.action_norm(batch["action"])

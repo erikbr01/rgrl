@@ -37,6 +37,7 @@ _QUAT_CONVENTIONS = {"xyzw", "wxyz"}
 
 _RGRL_META_FILE = "rgrl_meta.json"
 _STATS_FILE = "stats.json"
+EPISODE_VIEW_FILE = "episode_view.json"
 
 
 @dataclass
@@ -92,6 +93,14 @@ class EpisodeStore:
     def __init__(self, path: str | Path, shape_meta: dict):
         self.path = Path(path)
         self._robo = open_store(str(self.path))
+        view_path = self.path / EPISODE_VIEW_FILE
+        self.episode_ids: tuple[int, ...] | None = None
+        if view_path.exists():
+            from robo_dataset.views import EpisodeView
+
+            view_doc = json.loads(view_path.read_text())
+            self.episode_ids = tuple(view_doc["episode_ids"])
+            self._robo = EpisodeView(self._robo, self.episode_ids)
 
         keys = {}
         for k, spec in shape_meta["obs"].items():

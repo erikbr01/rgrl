@@ -1,8 +1,9 @@
 defaults:
   - data: lift_state
   - target: lift_state
-  - policy: diffusion
+  - policy: flow
   - training: default
+  - sampling: uniform
   - override hydra/job_logging: none
   - override hydra/hydra_logging: none
   - _self_
