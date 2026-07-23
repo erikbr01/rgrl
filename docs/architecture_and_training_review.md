@@ -19,6 +19,7 @@ The `robo_dataset` work is captured in local submodule commit `64bb0a5`
 |---|---|
 | Experiment state | Policy initialization is seeded at the application boundary. Checkpoints now contain model, EMA, optimizer, scheduler, all RNG states, exact batch cursor, sample count, W&B identity, schema version, and a compatibility fingerprint. |
 | Checkpoint safety | A checkpoint is serialized once, fsynced, atomically renamed, and published through an atomically replaced relative `latest.pt` symlink. Completed/lower-target runs cannot overwrite progress; extensions are explicit. |
+| Legacy inference | Pre-shape-meta diffusion and flow checkpoints load through an isolated compatibility module that requires and validates the original store sidecars. It never guesses image modalities from dtype. |
 | Validation | Validation uses an isolated fixed RNG stream, computes a sample-weighted mean, validates split sizes, and does not change subsequent training updates. |
 | Recipe semantics | Training, warmup, logging, validation, and checkpoint cadence can all be expressed in samples. The DROID recipes use explicit 51.2M/76.8M sample budgets. |
 | Sampling | Uniform/weighted sampling is a separate Hydra group. Resident and shared-memory modes use the same deterministic epoch order and resume from the exact next batch. |
@@ -47,6 +48,9 @@ These are isolated measurements, not additive speedup claims:
 | DROID observation encoder, B=32, T=2, 3 cameras | 33.58M params, 11.61 ms fwd+bwd | 11.19M params, 8.62 ms fwd+bwd | **66.7%** fewer encoder params and **25.8%** faster encoder step; modeling change |
 | ToolHang compiled B=1 inference | DDIM-10: 12.847 ms; DDIM-16: 20.508 ms | Flow Euler-10: 12.602 ms | Flow is 1.9% faster at equal network calls and 38.5% faster than the 16-step preset |
 | ToolHang image flow, B=64, two 84×84 cameras | Compile-affected first 100-step window: 0.4k samples/s | Steady state: 3.8k samples/s | Data wait was effectively zero; model fwd/bwd dominated |
+| ToolHang image flow, physical batch | 3.8k samples/s at 64 | 6.4–6.5k samples/s at 256 | **1.71×** samples/s; full 7.68M-sample run reached 80% success |
+| ToolHang image flow, batch 256→512 probe | 6.5k samples/s | 7.1k samples/s | Only **1.09×** further; the short equal-sample probe learned materially more slowly, so batch 512 was not promoted |
+| Flow Euler timestep preallocation, compiled B=1 | 11.520 ms/call with `torch.full` | 11.528 ms/call with a saved buffer | No measurable effect; extra machinery was removed |
 
 The real DROID set-table selection is 23.79 GB. An intentional
 `cuda_resident` test exhausted a 24 GB card at the first Adam update. The same
@@ -72,16 +76,18 @@ Two real ToolHang PH paths were exercised through the public entry points:
   samples/s. The final EMA checkpoint then achieved **45/50 successes (90%)**
   in the simulator. Repeating all 50 episodes through the new direct
   Robosuite adapter produced the same 45/50 result.
-- **Image policy:** `tools/render_robosuite_dataset.py` rendered 16 real PH
-  episodes (9,395 frames) from raw simulator states using `sideview` and
+- **Image policy:** `tools/render_robosuite_dataset.py` rendered all 200 real
+  PH episodes (95,962 frames) from raw simulator states using `sideview` and
   `robot0_eye_in_hand` at 84×84. The non-privileged target uses those cameras
-  plus proprioception and excludes `object`. A compiled 300-step / 19,200
-  sample flow run completed cold-cache conversion, GPU-resident loading,
-  training, validation, intermediate saving, final saving, checkpoint reload,
-  and five live image rollouts. Steady state was 3.8k samples/s; train loss
-  fell 0.8190→0.2552 and fixed-noise validation loss 0.3952→0.2565. The short
-  integration checkpoint scored 0/5, as expected from only 2.68 passes over a
-  16-episode subset; this is pipeline coverage, not a policy-quality result.
+  plus proprioception and excludes `object`. A compiled rectified-flow run
+  completed 7.68M samples / 30,000 batch-256 updates, including conversion,
+  GPU-resident loading, fixed-noise validation, three atomic checkpoints,
+  checkpoint reload, and 50 live image rollouts. Steady state was 6.4–6.5k
+  samples/s. Success on the same first 20 seeds rose from **8/20 (40%)** at
+  2.56M samples to **15/20 (75%)** at 5.12M and **16/20 (80%)** at 7.68M;
+  the final 50-episode result was **40/50 (80%)**. The earlier 19,200-sample
+  subset smoke test's 0/5 was therefore undertraining, not evidence of a
+  broken image pipeline.
 
 The direct renderer was checked against the old wrapper output on all 681
 frames of one episode. Both camera tensors were byte-identical; low-dimensional
@@ -89,13 +95,48 @@ values agreed within 5.93e-8 (the direct tool stores float32). After dependency
 resynchronization, neither `robomimic` nor `mujoco_py` was installed, and a
 live rollout still completed against Robosuite 1.4.1 + MuJoCo 2.3.7.
 
+### Image-pipeline correctness audit
+
+End-to-end execution alone does not establish semantic correctness. The image
+path was therefore checked at each boundary:
+
+| Boundary | Check | Result |
+|---|---|---|
+| Raw state → rendered HDF5 | Replayed 15 recorded states spanning demos 0, 7, and 15 through modern Robosuite | Both camera tensors and every requested low-dimensional scalar were exact |
+| Rendered HDF5 → training cache | Exhaustively compared all six policy keys in all 200 episodes | **95,962/95,962 frames exact**; zero unequal camera, proprioception, or action scalars |
+| Episode windows | Checked start/interior/end anchors in every subset episode and added a synthetic image regression test | Observation is `[t-1,t]`; prediction slot `obs_horizon-1` is action `t`; padding never crosses episodes; uint8 NHWC is preserved |
+| Image preprocessing | Compared actual ToolHang pixels against the former float-first pipeline and explicit center crop | Seeded training random crops and evaluation center crops were bit-exact; output is float NCHW in `[0,1]` |
+| Camera convention | Compared the direct renderer to the former official wrapper on a complete 681-frame episode | Camera bytes were identical, including vertical orientation |
+| Shared inference stack | Loaded the known-good legacy Lift diffusion image checkpoint through the current loader and direct simulator adapter | **49/50 (98%)**, matching its historical result |
+| Current flow + image stack | Trained a fresh 1.28M-sample Lift FlowPolicy and evaluated its EMA checkpoint | **50/50 (100%)** |
+| ToolHang task-specific behavior | Matched-seed checkpoints at 2.56M, 5.12M, and 7.68M samples | **40% → 75% → 80%** on the common first 20 seeds; final **80% over 50** |
+
+The audit found one real regression: old checkpoints predated the self-contained
+`target` schema and failed with `KeyError: target`. The compatibility path now
+recognizes only the old diffusion/flow format, requires `meta.json`,
+`rgrl_meta.json`, and `stats.json`, reconstructs the exact historical crop,
+and rejects stores without an explicit `image_keys` declaration. Current
+checkpoints remain fully self-contained and do not open training data.
+
+Two interpretation limits matter:
+
+- The reference Diffusion Policy ToolHang recipe renders 240×240 and crops to
+  116×116; this throughput-oriented experiment renders 84×84 and crops to
+  76×76. Reaching 80% shows that 84×84 is viable, not that it is quality-optimal.
+  A matched 84-vs-240 resolution ablation is the next image-quality experiment.
+- Fixed-noise flow validation loss was not behaviorally calibrated: it rose
+  late in both image runs even though Lift achieved 100% and ToolHang improved
+  from 40% to 80%. It is useful for deterministic numerical comparisons, but
+  rollout success remains the model-selection metric.
+
 ### Validation status and remaining limits
 
 - `uv run --extra dev ruff check .`: passed.
-- `CUDA_VISIBLE_DEVICES=0 uv run --all-extras pytest tests -q`: **82 passed**,
+- `CUDA_VISIBLE_DEVICES=0 uv run --all-extras pytest tests -q`: **88 passed**,
   including CUDA prefetch lifetime stress, bit-exact interruption/resume,
   validation RNG isolation, logical view/cache failure recovery, weighted
-  sampling, crop equivalence, and shared-encoder compatibility tests.
+  sampling, crop equivalence, image/action temporal alignment, strict legacy
+  checkpoint migration, and shared-encoder compatibility tests.
 - `CUDA_VISIBLE_DEVICES=0 uv run --all-extras pytest
   third_party/robo_dataset/tests -q`: **202 passed, 15 skipped**, including
   direct `EpisodeView` contract/mapping tests.

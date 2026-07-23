@@ -64,6 +64,8 @@ class FlowPolicy(nn.Module):
         self.unet = ConditionalUnet1D(
             in_dim, global_cond_dim=self.enc.out_dim, down_dims=cfg.down_dims, out_dim=self.act_dim
         )
+        if cfg.inference_steps <= 0:
+            raise ValueError(f"inference_steps must be positive, got {cfg.inference_steps}")
 
     def _sample_prefix_mask(self, b: int, device: torch.device) -> torch.Tensor:
         """(B, horizon, 1) bool prefix mask — see DiffusionPolicy's twin."""

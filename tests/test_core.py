@@ -1,5 +1,6 @@
 """Fast CPU sanity tests: window indexing, normalization, crops, UNet shapes."""
 
+import json
 import numpy as np
 import pytest
 import torch
@@ -11,13 +12,15 @@ from robo_dataset.normalization import fit_key
 from robo_dataset.transforms.gpu_batch import CenterCrop, RandomCrop
 
 from rgrl.dataset import CpuSequenceDataset, GpuSequenceDataset, Windows, build_dataset
+from rgrl.inference.checkpoint import InferenceConfig, load_policy
+from rgrl.inference.legacy_checkpoint import legacy_shape_meta
 from rgrl.nets.unet1d import ConditionalUnet1D
 from rgrl.normalize import Normalizer
 from rgrl.policies.base import ObsEncoder
 from rgrl.policies.diffusion import DiffusionPolicy
 from rgrl.policies.dit_flow import DiTFlowPolicy
 from rgrl.policies.flow import FlowPolicy
-from rgrl.store import EpisodeStore, KeySpec, write_sidecars
+from rgrl.store import EpisodeStore, KeySpec, StoreMeta, write_sidecars
 from rgrl.train_loop import TrainConfig, seed_everything, train
 from rgrl.transforms import (
     CropTransform,
@@ -81,6 +84,56 @@ def test_gather_matches_direct_indexing(tiny_store):
     assert batch["action"].shape == (3, 4, 2)
     raw = ds.tensors["state"]
     assert torch.equal(batch["state"][1], raw[ds.obs_idx[8]])
+
+
+def test_image_window_preserves_nhwc_and_current_action_alignment():
+    """The first action a policy returns is prediction slot obs_horizon-1.
+
+    That slot must align with the newest image in the observation window,
+    including at episode boundaries. This is the image-policy version of the
+    generic index-table check above and guards the complete gather contract.
+    """
+    n = 4
+    images = np.stack(
+        [np.full((3, 5, 3), t, dtype=np.uint8) for t in range(n)]
+    )
+    actions = np.stack(
+        [np.array([t, -t], dtype=np.float32) for t in range(n)]
+    )
+
+    class ImageStore:
+        meta = StoreMeta(
+            episode_ends=[n],
+            keys={
+                "camera": KeySpec([3, 5, 3], "uint8", "image", channel_order="rgb"),
+                "action": KeySpec([2], "float32", "action"),
+            },
+        )
+
+        @staticmethod
+        def episode_bounds():
+            return np.array([[0, n]], dtype=np.int64)
+
+        @staticmethod
+        def load(key, episode_range=None):
+            assert episode_range == (0, 1)
+            return images if key == "camera" else actions
+
+    ds = GpuSequenceDataset(ImageStore(), Windows(2, 4), torch.device("cpu"))
+    batch = ds.gather(torch.tensor([0, 2, 3]))
+
+    assert batch["camera"].shape == (3, 2, 3, 5, 3)
+    assert batch["camera"].dtype == torch.uint8
+    assert batch["camera"].is_contiguous()
+    # Front fill at t=0; normal consecutive context at t=2; never CHW.
+    torch.testing.assert_close(
+        batch["camera"][0, :, 0, 0, 0], torch.tensor([0, 0], dtype=torch.uint8)
+    )
+    torch.testing.assert_close(
+        batch["camera"][1, :, 0, 0, 0], torch.tensor([1, 2], dtype=torch.uint8)
+    )
+    # Prediction slot 1 corresponds to the current image/action at each anchor.
+    torch.testing.assert_close(batch["action"][:, 1], torch.from_numpy(actions[[0, 2, 3]]))
 
 
 def test_val_split_loads_only_its_own_episodes_not_a_full_store_copy(tiny_store):
@@ -439,6 +492,117 @@ def test_diffusion_policy_sample_timesteps_buffer(tiny_store):
         action = policy.predict_action(batch)
         assert action.shape == (3, 2, 2)
         assert torch.isfinite(action).all()
+
+
+def test_flow_policy_rejects_nonpositive_inference_steps(tiny_store):
+    with pytest.raises(ValueError, match="inference_steps must be positive"):
+        FlowPolicy(tiny_store, inference_steps=0, data_transforms=[])
+
+
+@pytest.mark.parametrize(
+    ("policy_name", "policy_class", "specific_kwargs"),
+    [
+        (
+            "diffusion",
+            DiffusionPolicy,
+            {"train_timesteps": 20, "inference_steps": 5, "sampler": "ddim"},
+        ),
+        (
+            "flow",
+            FlowPolicy,
+            {"inference_steps": 5, "timestep_scale": 1000},
+        ),
+    ],
+)
+def test_legacy_checkpoint_loader_uses_declared_store_schema(
+    tiny_store,
+    tmp_path,
+    policy_name,
+    policy_class,
+    specific_kwargs,
+):
+    # Legacy checkpoints omitted shape_meta and therefore require the old
+    # store's explicit image_keys sidecar (empty for this state-only fixture).
+    rgrl_meta_path = tiny_store.path / "rgrl_meta.json"
+    rgrl_meta = json.loads(rgrl_meta_path.read_text())
+    rgrl_meta["image_keys"] = []
+    rgrl_meta_path.write_text(json.dumps(rgrl_meta))
+
+    kwargs = {
+        "obs_horizon": 2,
+        "horizon": 4,
+        "n_action_steps": 2,
+        "down_dims": [8, 16],
+        "num_kp": 4,
+        **specific_kwargs,
+    }
+    original = policy_class(tiny_store, data_transforms=[], **kwargs)
+    ckpt_path = tmp_path / f"legacy-{policy_name}.pt"
+    torch.save(
+        {
+            "model": original.state_dict(),
+            "ema": original.state_dict(),
+            "step": 123,
+            "config": {
+                "store": str(tiny_store.path),
+                "policy": policy_name,
+                policy_name: kwargs,
+                "crop_hw": None,
+            },
+        },
+        ckpt_path,
+    )
+
+    loaded, store, step = load_policy(
+        ckpt_path,
+        InferenceConfig(compile=False),
+        torch.device("cpu"),
+    )
+    assert step == 123
+    assert store.meta.keys == tiny_store.meta.keys
+    for key, expected in original.state_dict().items():
+        torch.testing.assert_close(loaded.state_dict()[key], expected)
+
+    batch = {"state": torch.randn(2, 2, 3)}
+    torch.manual_seed(17)
+    expected = original.eval().predict_action(batch)
+    torch.manual_seed(17)
+    actual = loaded.predict_action(batch)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+def test_legacy_schema_refuses_to_guess_modalities(tiny_store):
+    with pytest.raises(ValueError, match="no image_keys declaration"):
+        legacy_shape_meta(tiny_store.path)
+
+
+def test_legacy_schema_preserves_declared_image_modality(tmp_path):
+    (tmp_path / "meta.json").write_text(
+        json.dumps(
+            {
+                "keys": ["camera", "state", "action"],
+                "shapes": {
+                    "camera": [32, 48, 3],
+                    "state": [4],
+                    "action": [2],
+                },
+            }
+        )
+    )
+    (tmp_path / "rgrl_meta.json").write_text(json.dumps({"image_keys": ["camera"]}))
+    (tmp_path / "stats.json").write_text(json.dumps({"state": {}, "action": {}}))
+
+    assert legacy_shape_meta(tmp_path) == {
+        "obs": {
+            "camera": {
+                "shape": [32, 48, 3],
+                "type": "rgb",
+                "channel_order": "rgb",
+            },
+            "state": {"shape": [4], "type": "low_dim"},
+        },
+        "action": {"shape": [2]},
+    }
 
 
 def _rtc_policy_checks(policy):

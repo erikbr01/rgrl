@@ -1,4 +1,4 @@
-"""Load a trained policy checkpoint — no env or training-data dependency at all.
+"""Load a trained policy checkpoint.
 
 Moved out of rgrl/eval_robomimic.py so a policy-serving process
 (rgrl/inference/policy_server.py) never has to install Robosuite or MuJoCo:
@@ -7,19 +7,20 @@ rgrl/eval_robomimic.py re-imports InferenceConfig and load_policy from here
 for backward compatibility (configs/inference/*.yaml's
 _target_: rgrl.eval_robomimic.InferenceConfig keeps resolving unchanged).
 
-load_policy builds its `store` from the checkpoint's own saved shape_meta
-(_ConfigStore) rather than reopening the real training dataset — a
-checkpoint's weights (incl. fitted normalizer buffers) are fully
-self-contained, so nothing about loading it for inference should require
-the original bytes on disk. The one thing this drops is real `env_meta`
-(e.g. robosuite's simulator kwargs): _ConfigStore's is always empty, which
-is fine for real-robot inference (DroidEnv never reads it) but means a
-robomimic sim rollout needs the actual EpisodeStore, not this shortcut.
+Current checkpoints build their `store` from saved shape_meta (_ConfigStore)
+rather than reopening the real training dataset: weights, fitted normalizer
+buffers, and simulator env_meta are self-contained.
+
+Checkpoints from the pre-shape_meta config format are supported through one
+explicit compatibility path. They did not save enough schema to stand alone,
+so loading one requires its original EpisodeStore sidecars. We validate those
+sidecars and use their declared image keys; no modality is guessed from dtype.
 """
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -148,13 +149,21 @@ def load_policy(
 
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     tc = ckpt["config"]
-    store = _ConfigStore(tc["target"], tc.get("env_meta"))
-    policy_cfg = dict(tc["policy"])  # the resolved config that built it at train time — _target_ and all
-    if inference.sampler is not None:
-        policy_cfg["sampler"] = inference.sampler
-    if inference.inference_steps is not None:
-        policy_cfg["inference_steps"] = inference.inference_steps
-    policy = instantiate(policy_cfg, store=store)
+    if "target" in tc and isinstance(tc.get("policy"), Mapping):
+        store = _ConfigStore(tc["target"], tc.get("env_meta"))
+        # the resolved config that built it at train time — _target_ and all
+        policy_cfg = dict(tc["policy"])
+        if inference.sampler is not None:
+            policy_cfg["sampler"] = inference.sampler
+        if inference.inference_steps is not None:
+            policy_cfg["inference_steps"] = inference.inference_steps
+        policy = instantiate(policy_cfg, store=store)
+    else:
+        # Isolated and lazy: normal inference never imports or depends on the
+        # compatibility implementation.
+        from rgrl.inference.legacy_checkpoint import build_legacy_policy
+
+        policy, store = build_legacy_policy(tc, ckpt_path, inference)
     policy.load_state_dict(ckpt["ema" if inference.use_ema else "model"])
     policy = policy.to(device).eval()
 
