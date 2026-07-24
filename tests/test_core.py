@@ -900,6 +900,43 @@ def test_interrupted_resume_is_bit_exact(tiny_store, tmp_path, monkeypatch):
     assert not list((tmp_path / "interrupted").glob(".*.tmp"))
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+def test_cuda_resume_is_bit_exact(tiny_store, tmp_path, monkeypatch):
+    # Regression: the checkpoint is loaded with map_location=device, which moves
+    # the saved RNG ByteTensors onto the GPU. torch.{,cuda.}set_rng_state require
+    # CPU ByteTensors, so a CUDA resume used to die in _restore_rng_state with
+    # "RNG state must be a torch.ByteTensor". This exercises the map_location=cuda
+    # path the CPU-device resume tests never hit -- and, like its CPU sibling,
+    # asserts the resumed run is *bit-identical* to an uninterrupted one, so a
+    # coerced-but-wrong RNG restore (e.g. a zeroed/shallow-copied state that still
+    # reaches step 6) is caught rather than passing silently.
+    import rgrl.train_loop as train_loop
+
+    uninterrupted = _train_tiny(tiny_store, _tiny_train_cfg(tmp_path / "uninterrupted", device="cuda"))
+
+    original_save = train_loop._atomic_save_checkpoint
+
+    class SimulatedCrash(RuntimeError):
+        pass
+
+    def save_then_crash(out, step, payload):
+        path = original_save(out, step, payload)
+        if step == 3:
+            raise SimulatedCrash("injected immediately after durable checkpoint")
+        return path
+
+    monkeypatch.setattr(train_loop, "_atomic_save_checkpoint", save_then_crash)
+    interrupted_cfg = _tiny_train_cfg(tmp_path / "interrupted", device="cuda")
+    with pytest.raises(SimulatedCrash):
+        _train_tiny(tiny_store, interrupted_cfg)
+    monkeypatch.setattr(train_loop, "_atomic_save_checkpoint", original_save)
+
+    resumed = _train_tiny(tiny_store, interrupted_cfg)
+    for key in ("model", "ema", "optimizer", "scheduler", "rng"):
+        _assert_nested_equal(uninterrupted[key], resumed[key])
+    assert resumed["step"] == uninterrupted["step"] == 6
+
+
 def test_completed_and_incompatible_resumes_are_guarded(tiny_store, tmp_path):
     out = tmp_path / "guarded"
     cfg = _tiny_train_cfg(out, steps=2, save_every=2)
