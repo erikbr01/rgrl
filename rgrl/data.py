@@ -263,12 +263,10 @@ def load_store(
     native format, e.g. a DROID VideoStore — no re-encode needed, see
     `_convert_from_store`).
 
-    `stats_workers` sets the normalizer-fit thread pool at conversion time;
-    None falls back to the RGRL_STATS_WORKERS env var, then to one thread per
-    key (capped at the CPU count). Only matters on a cache miss."""
-    if stats_workers is None:
-        env_workers = os.environ.get("RGRL_STATS_WORKERS")
-        stats_workers = int(env_workers) if env_workers else None
+    `stats_workers` sets the normalizer-fit process count at conversion time
+    (its sole source is the caller, i.e. the `stats_workers` Hydra config).
+    None means one process per key, capped at the CPU count. Only matters on a
+    cache miss."""
     source_cfg = resolve_source_config(source_cfg)
     target_shape_meta = _to_plain(target_shape_meta)
     source_kind = "store" if "store_path" in source_cfg else "hdf5"
