@@ -1,23 +1,10 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "name": "prepare_tray_baseline",
   "source": {
     "dataset_id": "droid_prepare_tray_trimmed"
   },
-  "provenance": {
-    "origin": "diffusion_policy prepare_tray_baseline episodes_per_task",
-    "predicates": {
-      "tasks": [
-        "prepare tray - top",
-        "prepare tray - bottom"
-      ]
-    },
-    "counts_by_task": {
-      "prepare tray - top": 60,
-      "prepare tray - bottom": 60
-    }
-  },
-  "ordering": "sorted",
+  "notes": "Explicit episode ids (escape hatch): this set was drawn upstream by diffusion_policy with no recorded seed and is not regenerable by a (task, seed, count) rule.",
   "count": 120,
   "episode_ids": [
     0,

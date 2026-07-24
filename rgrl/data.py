@@ -23,6 +23,7 @@ import logging
 import os
 import shutil
 import uuid
+from collections import defaultdict
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -49,8 +50,73 @@ def _hash_document(value: dict) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
 
-def _load_selection_manifest(path: Path, seen: tuple[Path, ...] = ()) -> dict:
-    """Resolve a versioned selection, including optional parent + additions."""
+def _store_task_episodes(store_path: Path) -> dict[str, list[int]]:
+    """Read the store's tasks.json into task name -> sorted physical episode ids."""
+    tasks_path = store_path / "tasks.json"
+    if not tasks_path.exists():
+        raise FileNotFoundError(
+            f"generative selection needs {tasks_path} (task label per episode); not found"
+        )
+    by_task: dict[str, list[int]] = defaultdict(list)
+    for episode, task in json.loads(tasks_path.read_text()).items():
+        by_task[str(task)].append(int(episode))
+    return {task: sorted(ids) for task, ids in by_task.items()}
+
+
+def _store_curation(store_path: Path) -> dict[str, dict[int, int]]:
+    """Read the store's optional curation.json: the success curation baked into
+    the store as per-task {unsuccessful_episode -> successful substitute}. It is
+    applied to a draw only where the unsuccessful episode is actually drawn, so
+    disjoint draws (base vs follow-up) never collide. Missing file -> no curation."""
+    path = store_path / "curation.json"
+    if not path.exists():
+        return {}
+    raw = json.loads(path.read_text())
+    return {task: {int(o): int(n) for o, n in swaps.items()} for task, swaps in raw.items()}
+
+
+def _seeded_choice(episodes: list[int], count: int, seed: int) -> list[int]:
+    """`count` episodes drawn without replacement from `episodes`, seeded and
+    sorted. count >= len keeps them all. The RNG contract (np.random.default_rng
+    + choice/replace=False) is fixed: it defines every checked-in selection."""
+    values = np.asarray(episodes)
+    if count >= len(values):
+        return sorted(values.tolist())
+    return sorted(np.random.default_rng(seed).choice(values, size=count, replace=False).tolist())
+
+
+def _seeded_continuation(episodes: list[int], used: set[int], count: int, seed: int) -> list[int]:
+    """Next `count` episodes for the same task, disjoint from `used` (the raw
+    draws of prior selections) -- this is "two selections for one task = sampling
+    without replacement". Uses permutation of the remainder so it is stable
+    regardless of how many were taken before."""
+    remaining = np.asarray([e for e in episodes if e not in used])
+    if count >= len(remaining):
+        return sorted(remaining.tolist())
+    return sorted(np.random.default_rng(seed).permutation(remaining)[:count].tolist())
+
+
+def _apply_curation(draw: list[int], swaps: dict[int, int]) -> list[int]:
+    """Substitute unsuccessful episodes present in this draw with their
+    successful replacements."""
+    result = set(draw)
+    for old, new in swaps.items():
+        if old not in result:
+            continue  # this swap belongs to a different (disjoint) draw
+        if new in result:
+            raise ValueError(f"curation target {new} already present in the draw")
+        result.discard(old)
+        result.add(new)
+    return sorted(result)
+
+
+def _resolve_selection(
+    path: Path, store_path: Path | None, seen: tuple[Path, ...] = ()
+) -> tuple[dict, dict[str, set[int]]]:
+    """Resolve a v2 selection manifest to its episode ids. Returns the resolved
+    dict plus the per-task *raw* (pre-curation) draws, which a child manifest's
+    same-task continuation must exclude. See configs/selections/README-style
+    docstring in the manifests themselves."""
     path = path.resolve()
     if path in seen:
         chain = " -> ".join(str(item) for item in (*seen, path))
@@ -60,62 +126,95 @@ def _load_selection_manifest(path: Path, seen: tuple[Path, ...] = ()) -> dict:
     doc = OmegaConf.to_container(OmegaConf.load(path), resolve=True)
     if not isinstance(doc, dict):
         raise TypeError(f"selection manifest {path} must contain a mapping")
-    if doc.get("schema_version") != 1:
+    if doc.get("schema_version") != 2:
         raise ValueError(
             f"selection manifest {path} has unsupported schema_version "
-            f"{doc.get('schema_version')!r}"
+            f"{doc.get('schema_version')!r} (expected 2)"
         )
+    name = doc.get("name", path.stem)
+    source = doc.get("source", {})
 
-    parent = None
-    base_ids: list[int] = []
-    if doc.get("parent"):
-        parent_path = Path(doc["parent"])
-        if not parent_path.suffix:
-            parent_path = parent_path.with_suffix(path.suffix)
-        if not parent_path.is_absolute():
-            parent_path = path.parent / parent_path
-        parent = _load_selection_manifest(parent_path, (*seen, path))
-        base_ids = list(parent["episode_ids"])
-
-    if "episode_ids" in doc and ("add_episode_ids" in doc or parent is not None):
-        raise ValueError(
-            f"selection manifest {path} must use either episode_ids or parent/add_episode_ids"
-        )
+    # Escape hatch: an externally-curated set that no (task, seed, count) rule
+    # can regenerate (e.g. prepare_tray, drawn upstream with no recorded seed).
     if "episode_ids" in doc:
-        episode_ids = list(doc["episode_ids"])
+        if "select" in doc or "parent" in doc:
+            raise ValueError(
+                f"selection manifest {path} must use either episode_ids or select/parent"
+            )
+        # Preserve caller order (dedup keeping first occurrence): an explicit
+        # set is "exactly these episodes, in this order", matching the direct
+        # source_cfg episode_ids subset semantics.
+        episode_ids = list(dict.fromkeys(int(e) for e in doc["episode_ids"]))
+        resolved = {"name": name, "source": source, "episode_ids": episode_ids}
     else:
-        episode_ids = base_ids + list(doc.get("add_episode_ids", []))
-    if doc.get("ordering", "preserve") == "sorted":
-        episode_ids = sorted(episode_ids)
-    elif doc.get("ordering", "preserve") != "preserve":
-        raise ValueError(f"selection manifest {path} has unknown ordering")
-    if doc.get("count") is not None and int(doc["count"]) != len(episode_ids):
+        if "select" not in doc or "seed" not in doc:
+            raise ValueError(
+                f"generative selection manifest {path} needs both 'seed' and 'select'"
+            )
+        if store_path is None:
+            raise ValueError(
+                f"generative selection manifest {path} needs the source store_path "
+                "(for tasks.json/curation.json) but none was provided"
+            )
+        seed = int(doc["seed"])
+        raw_used: dict[str, set[int]] = defaultdict(set)
+        ids: list[int] = []
+        if doc.get("parent"):
+            parent_path = Path(doc["parent"])
+            if not parent_path.suffix:
+                parent_path = parent_path.with_suffix(path.suffix)
+            if not parent_path.is_absolute():
+                parent_path = path.parent / parent_path
+            parent_resolved, parent_raw = _resolve_selection(
+                parent_path, store_path, (*seen, path)
+            )
+            ids = list(parent_resolved["episode_ids"])
+            for task, drawn in parent_raw.items():
+                raw_used[task] |= drawn
+        task_episodes = _store_task_episodes(store_path)
+        curation = _store_curation(store_path)
+        for rule in doc["select"]:
+            task, count = rule["task"], int(rule["count"])
+            if task not in task_episodes:
+                raise ValueError(f"selection manifest {path}: unknown task {task!r}")
+            if raw_used[task]:
+                raw = _seeded_continuation(task_episodes[task], raw_used[task], count, seed)
+            else:
+                raw = _seeded_choice(task_episodes[task], count, seed)
+            raw_used[task] |= set(raw)
+            ids += _apply_curation(raw, curation.get(task, {}))
+        episode_ids = sorted(set(ids))
+        resolved = {"name": name, "source": source, "episode_ids": episode_ids}
+
+    if doc.get("count") is not None and int(doc["count"]) != len(resolved["episode_ids"]):
         raise ValueError(
             f"selection manifest {path} declares count={doc['count']} but resolves "
-            f"to {len(episode_ids)} episodes"
+            f"to {len(resolved['episode_ids'])} episodes"
         )
+    return resolved, ({} if "episode_ids" in doc else raw_used)
 
-    resolved = {
-        "schema_version": 1,
-        "name": doc.get("name", path.stem),
-        "source": doc.get("source", {}),
-        "provenance": doc.get("provenance", {}),
-        "episode_ids": episode_ids,
-        "parent_fingerprint": parent["fingerprint"] if parent else None,
-        "raw": doc,
-    }
-    resolved["fingerprint"] = _hash_document(resolved)
+
+def _load_selection_manifest(path: Path, store_path: Path | None = None) -> dict:
+    """Resolve a v2 selection manifest to {name, source, episode_ids}."""
+    resolved, _ = _resolve_selection(path, store_path)
     return resolved
 
 
 def resolve_source_config(source_cfg) -> dict:
-    """Resolve Hydra input and replace selection_path with immutable contents."""
+    """Resolve Hydra input, replacing selection_path with the resolved episode
+    ids. Only the resolved ids enter `source` (and thus the conversion-cache and
+    checkpoint fingerprints) -- the manifest's authoring form (seed, per-task
+    counts, provenance) is deliberately not hashed, so editing a manifest's
+    provenance without changing which episodes it resolves to reuses the cache."""
     source = _to_plain(source_cfg)
     selection_path = source.pop("selection_path", None)
     if selection_path is not None and source.get("episode_ids") is not None:
         raise ValueError("data config cannot set both selection_path and episode_ids")
     if selection_path is not None:
-        selection = _load_selection_manifest(Path(selection_path))
+        store_path = source.get("store_path")
+        selection = _load_selection_manifest(
+            Path(selection_path), Path(store_path) if store_path else None
+        )
         expected_source = selection.get("source", {}).get("dataset_id")
         actual_source = source.get("dataset_id")
         if expected_source and actual_source and expected_source != actual_source:
@@ -124,7 +223,6 @@ def resolve_source_config(source_cfg) -> dict:
                 f"declares {actual_source!r}"
             )
         source["episode_ids"] = selection["episode_ids"]
-        source["selection_manifest"] = selection
     return source
 
 

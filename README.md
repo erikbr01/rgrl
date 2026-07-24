@@ -31,9 +31,15 @@ current update without multiprocessing large image batches.
   shared_memory` placement; vectorized windowing and batch gathering with
   edge-replication + pad masks. Sampling is a pure function of seed, epoch,
   and absolute batch cursor in every mode.
-- **Selections** (`configs/selections/`): versioned logical episode manifests.
-  `robo_dataset.EpisodeView` reads selected episodes from the original store
-  without re-encoding or copying videos.
+- **Selections** (`configs/selections/`): generative episode manifests — a
+  `(task, seed, count)` recipe resolved against the store's `tasks.json`, not a
+  hand-listed set of integer IDs. Two selections for the same task sample
+  without replacement (a `parent` continues the same seeded draw), and the
+  success curation (unsuccessful→successful episode swaps) is baked into the
+  store's `curation.json`. An explicit `episode_ids` escape hatch remains for
+  externally-curated sets with no regenerable rule. `robo_dataset.EpisodeView`
+  then reads the resolved episodes from the original store without re-encoding
+  or copying videos; only the resolved IDs enter the conversion-cache identity.
 - **Normalization**: fitting (method, per-key stats) is
   `robo_dataset.normalization`'s job, done once at conversion time.
   `rgrl/normalize.py` wraps the fitted `KeyNormalizer`'s (scale, offset) as
