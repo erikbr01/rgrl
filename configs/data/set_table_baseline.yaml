@@ -9,7 +9,18 @@ store_path: ${oc.env:RGRL_DATA_ROOT,/mnt/ssdB/erik}/droid_converted_v2_trimmed
 dataset_id: droid_v2_trimmed
 abs_action: false
 rename: {}
-selection_path: configs/selections/set_table_baseline.json
+# Generative selection resolved against the store's tasks.json: a seed-42 draw
+# of 60 "right" + 60 "middle". Success curation (unsuccessful->successful swaps)
+# lives in the store's curation.json; expected_sha256 pins the resolved set.
+selection:
+  seed: 42
+  select:
+    - task: "prepare plate - milk right"
+      count: 60
+    - task: "prepare plate - milk middle"
+      count: 60
+  count: 120
+  expected_sha256: "d0aae2abd2fa5334ad8a15bca18c00eb5fac1b7f1f58f1e5d248af193f8173bb"
 shape_meta:
   obs:
     wrist_image_left:

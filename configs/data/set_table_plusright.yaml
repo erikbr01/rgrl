@@ -10,7 +10,20 @@ store_path: ${oc.env:RGRL_DATA_ROOT,/mnt/ssdB/erik}/droid_converted_v2_trimmed
 dataset_id: droid_v2_trimmed
 abs_action: false
 rename: {}
-selection_path: configs/selections/set_table_plusright.json
+# Baseline (60 right + 60 middle) plus 60 more "right": listing "right" a
+# second time continues the same seeded draw without replacement, so these 60
+# are disjoint from the baseline's 60 right. Success curation in curation.json.
+selection:
+  seed: 42
+  select:
+    - task: "prepare plate - milk right"
+      count: 60
+    - task: "prepare plate - milk middle"
+      count: 60
+    - task: "prepare plate - milk right"
+      count: 60
+  count: 180
+  expected_sha256: "eabb8a3b5ef4b27ac84d2dc07cb02c2671cdf877918c4e61dc83d0cacaec1741"
 shape_meta:
   obs:
     wrist_image_left:

@@ -213,29 +213,13 @@ def test_sample_weights_path_does_not_bust_cache(synthetic_store, tmp_path):
     assert manifest.stat().st_mtime_ns == mtime_before  # no reconversion triggered
 
 
-def test_explicit_selection_manifest_resolves_to_zero_copy_view(
-    synthetic_store, tmp_path
-):
-    """A v2 explicit-episode_ids manifest (the escape hatch for externally
+def test_explicit_inline_selection_resolves_to_zero_copy_view(synthetic_store, tmp_path):
+    """An inline explicit-episode_ids selection (the escape hatch for externally
     curated sets) resolves to exactly those episodes, in order, as a zero-copy
     EpisodeView."""
-    selection_dir = tmp_path / "selections"
-    selection_dir.mkdir()
-    manifest = selection_dir / "explicit.json"
-    manifest.write_text(
-        json.dumps(
-            {
-                "schema_version": 2,
-                "name": "explicit",
-                "source": {"dataset_id": "synthetic"},
-                "count": 2,
-                "episode_ids": [1, 0],
-            }
-        )
-    )
     source_cfg = _zarr_store_source_cfg(synthetic_store)
     source_cfg["dataset_id"] = "synthetic"
-    source_cfg["selection_path"] = str(manifest)
+    source_cfg["selection"] = {"count": 2, "episode_ids": [1, 0]}
 
     store = load_store(source_cfg, source_cfg["shape_meta"], cache_root=tmp_path / "cache")
     assert store.episode_ids == (1, 0)  # caller order preserved
@@ -258,257 +242,126 @@ def _write_generative_store(tmp_path):
     store = tmp_path / "gen_store"
     store.mkdir()
     # 6 'alpha' + 4 'beta' episodes, interleaved so a sorted pool != draw order.
-    tasks = {}
-    for e in range(10):
-        tasks[str(e)] = "alpha" if e % 5 < 3 else "beta"
+    tasks = {str(e): ("alpha" if e % 5 < 3 else "beta") for e in range(10)}
     (store / "tasks.json").write_text(json.dumps(tasks))
     return store
 
 
+_ALPHA = [e for e in range(10) if e % 5 < 3]
+
+
 def test_generative_selection_is_deterministic_and_reproducible(tmp_path):
-    from rgrl.data import _load_selection_manifest
+    from rgrl.data import _resolve_selection
 
     store = _write_generative_store(tmp_path)
-    manifest = tmp_path / "base.json"
-    manifest.write_text(
-        json.dumps(
-            {
-                "schema_version": 2,
-                "name": "base",
-                "source": {"dataset_id": "gen"},
-                "seed": 7,
-                "select": [{"task": "alpha", "count": 3}],
-            }
-        )
-    )
-    first = _load_selection_manifest(manifest, store)["episode_ids"]
-    second = _load_selection_manifest(manifest, store)["episode_ids"]
+    sel = {"seed": 7, "select": [{"task": "alpha", "count": 3}]}
+    first = _resolve_selection(sel, store)
+    second = _resolve_selection(sel, store)
     assert first == second  # deterministic
     assert len(first) == 3
-    alpha = [e for e in range(10) if e % 5 < 3]
-    assert set(first) <= set(alpha)  # only alpha episodes
+    assert set(first) <= set(_ALPHA)  # only alpha episodes
 
 
 def test_generative_seed_changes_the_draw(tmp_path):
-    from rgrl.data import _load_selection_manifest
+    from rgrl.data import _resolve_selection
 
     store = _write_generative_store(tmp_path)
 
     def draw(seed):
-        m = tmp_path / f"s{seed}.json"
-        m.write_text(
-            json.dumps(
-                {
-                    "schema_version": 2,
-                    "name": f"s{seed}",
-                    "source": {"dataset_id": "gen"},
-                    "seed": seed,
-                    "select": [{"task": "alpha", "count": 2}],
-                }
-            )
-        )
-        return _load_selection_manifest(m, store)["episode_ids"]
+        return _resolve_selection({"seed": seed, "select": [{"task": "alpha", "count": 2}]}, store)
 
     assert draw(1) != draw(2)
 
 
-def test_generative_same_task_child_continues_without_replacement(tmp_path):
-    from rgrl.data import _load_selection_manifest
+def test_repeated_task_continues_without_replacement(tmp_path):
+    """Listing a task twice in one select list continues the same seeded draw
+    without replacement -- the mechanism the plus* follow-up configs use."""
+    from rgrl.data import _resolve_selection
 
     store = _write_generative_store(tmp_path)
-    base = tmp_path / "base.json"
-    base.write_text(
-        json.dumps(
-            {
-                "schema_version": 2,
-                "name": "base",
-                "source": {"dataset_id": "gen"},
-                "seed": 5,
-                "select": [{"task": "alpha", "count": 3}],
-            }
-        )
+    once = _resolve_selection({"seed": 5, "select": [{"task": "alpha", "count": 3}]}, store)
+    twice = _resolve_selection(
+        {"seed": 5, "select": [{"task": "alpha", "count": 3}, {"task": "alpha", "count": 3}]},
+        store,
     )
-    child = tmp_path / "child.json"
-    child.write_text(
-        json.dumps(
-            {
-                "schema_version": 2,
-                "name": "child",
-                "source": {"dataset_id": "gen"},
-                "parent": "base.json",
-                "seed": 5,
-                "select": [{"task": "alpha", "count": 3}],
-            }
-        )
-    )
-    base_ids = set(_load_selection_manifest(base, store)["episode_ids"])
-    child_ids = set(_load_selection_manifest(child, store)["episode_ids"])
-    # Child = parent's 3 plus the remaining 3 alpha episodes, no overlap beyond
-    # the parent set: all 6 alpha episodes, sampled without replacement.
-    assert base_ids <= child_ids
-    assert child_ids == {e for e in range(10) if e % 5 < 3}
+    assert set(once) <= set(twice)  # the second draw is additive
+    assert set(twice) == set(_ALPHA)  # all 6 alpha episodes, no overlap
+    assert len(twice) == len(set(twice)) == 6
 
 
 def test_generative_curation_swaps_unsuccessful_episodes(tmp_path):
-    from rgrl.data import _load_selection_manifest
+    from rgrl.data import _resolve_selection
 
     store = _write_generative_store(tmp_path)
-    manifest = tmp_path / "base.json"
-    manifest.write_text(
-        json.dumps(
-            {
-                "schema_version": 2,
-                "name": "base",
-                "source": {"dataset_id": "gen"},
-                "seed": 7,
-                "select": [{"task": "alpha", "count": 3}],
-            }
-        )
-    )
-    drawn = _load_selection_manifest(manifest, store)["episode_ids"]
+    sel = {"seed": 7, "select": [{"task": "alpha", "count": 3}]}
+    drawn = _resolve_selection(sel, store)
     # Bake a curation swapping a drawn alpha episode for another alpha episode.
     victim = drawn[0]
-    substitute = next(e for e in range(10) if e % 5 < 3 and e not in drawn)
-    (store / "curation.json").write_text(
-        json.dumps({"alpha": {str(victim): substitute}})
-    )
-    curated = _load_selection_manifest(manifest, store)["episode_ids"]
+    substitute = next(e for e in _ALPHA if e not in drawn)
+    (store / "curation.json").write_text(json.dumps({"alpha": {str(victim): substitute}}))
+    curated = _resolve_selection(sel, store)
     assert victim not in curated
     assert substitute in curated
 
 
 def test_generative_selection_validation_errors(tmp_path):
-    from rgrl.data import _load_selection_manifest
+    from rgrl.data import _resolve_selection
 
     store = _write_generative_store(tmp_path)
-
-    def manifest(body):
-        m = tmp_path / "m.json"
-        m.write_text(json.dumps({"schema_version": 2, "source": {}, **body}))
-        return m
 
     with pytest.raises(ValueError, match="unknown task"):
-        _load_selection_manifest(manifest({"seed": 1, "select": [{"task": "nope", "count": 1}]}), store)
+        _resolve_selection({"seed": 1, "select": [{"task": "nope", "count": 1}]}, store)
     with pytest.raises(ValueError, match="count"):
-        _load_selection_manifest(
-            manifest({"seed": 1, "count": 99, "select": [{"task": "alpha", "count": 2}]}), store
+        _resolve_selection(
+            {"seed": 1, "count": 99, "select": [{"task": "alpha", "count": 2}]}, store
         )
     with pytest.raises(ValueError, match="store_path"):
-        _load_selection_manifest(manifest({"seed": 1, "select": [{"task": "alpha", "count": 1}]}), None)
-    with pytest.raises(ValueError, match="either episode_ids or select"):
-        _load_selection_manifest(manifest({"episode_ids": [0], "select": []}), store)
-    with pytest.raises(ValueError, match="unsupported schema_version"):
-        m = tmp_path / "old.json"
-        m.write_text(json.dumps({"schema_version": 1, "episode_ids": [0]}))
-        _load_selection_manifest(m, store)
+        _resolve_selection({"seed": 1, "select": [{"task": "alpha", "count": 1}]}, None)
+    with pytest.raises(ValueError, match="either episode_ids or seed/select"):
+        _resolve_selection({"episode_ids": [0], "seed": 1, "select": []}, store)
 
 
-def test_manifest_provenance_edits_do_not_change_resolved_ids(tmp_path):
+def test_selection_provenance_edits_do_not_change_resolved_ids(tmp_path):
     """The resolved source (hence the conversion cache / resume fingerprint)
-    keys on episode ids only: editing free-text provenance while keeping the
-    same (task, seed, count) must not change what enters the hash."""
-    from rgrl.data import _load_selection_manifest
+    keys on episode ids only: editing free-text notes while keeping the same
+    (seed, select) must not change what resolves."""
+    from rgrl.data import _resolve_selection
 
     store = _write_generative_store(tmp_path)
-    body = {
-        "schema_version": 2,
-        "name": "base",
-        "source": {"dataset_id": "gen"},
-        "seed": 7,
-        "select": [{"task": "alpha", "count": 3}],
-    }
-    a = tmp_path / "a.json"
-    a.write_text(json.dumps(body))
-    b = tmp_path / "b.json"
-    b.write_text(json.dumps({**body, "notes": "totally different provenance text"}))
+    body = {"seed": 7, "select": [{"task": "alpha", "count": 3}]}
     assert (
-        _load_selection_manifest(a, store)["episode_ids"]
-        == _load_selection_manifest(b, store)["episode_ids"]
+        _resolve_selection(body, store)
+        == _resolve_selection({**body, "notes": "totally different text"}, store)
     )
 
 
 def test_expected_sha256_audit_lock_catches_drift(tmp_path):
     """The expected_sha256 lock turns a silently-changed resolution (missing
     curation, numpy RNG drift, edited seed/count) into a hard error."""
-    from rgrl.data import _load_selection_manifest, _episode_ids_sha256
+    from rgrl.data import _resolve_selection, _episode_ids_sha256
 
     store = _write_generative_store(tmp_path)
-    body = {
-        "schema_version": 2,
-        "name": "base",
-        "source": {"dataset_id": "gen"},
-        "seed": 7,
-        "select": [{"task": "alpha", "count": 3}],
-    }
-    manifest = tmp_path / "m.json"
-    # Correct lock resolves fine.
-    manifest.write_text(json.dumps(body))
-    good = _load_selection_manifest(manifest, store)["episode_ids"]
-    manifest.write_text(json.dumps({**body, "expected_sha256": _episode_ids_sha256(good)}))
-    assert _load_selection_manifest(manifest, store)["episode_ids"] == good
-    # A stale/wrong lock is rejected.
-    manifest.write_text(json.dumps({**body, "expected_sha256": "deadbeef"}))
+    body = {"seed": 7, "select": [{"task": "alpha", "count": 3}]}
+    good = _resolve_selection(body, store)
+    assert _resolve_selection({**body, "expected_sha256": _episode_ids_sha256(good)}, store) == good
     with pytest.raises(ValueError, match="expected_sha256"):
-        _load_selection_manifest(manifest, store)
+        _resolve_selection({**body, "expected_sha256": "deadbeef"}, store)
 
 
 def test_curation_must_reference_in_task_episodes(tmp_path):
-    from rgrl.data import _load_selection_manifest
+    from rgrl.data import _resolve_selection
 
     store = _write_generative_store(tmp_path)
-    manifest = tmp_path / "m.json"
-    manifest.write_text(
-        json.dumps(
-            {
-                "schema_version": 2,
-                "name": "base",
-                "source": {"dataset_id": "gen"},
-                "seed": 7,
-                "select": [{"task": "alpha", "count": 3}],
-            }
-        )
-    )
+    sel = {"seed": 7, "select": [{"task": "alpha", "count": 3}]}
     beta_episode = next(e for e in range(10) if e % 5 >= 3)  # belongs to 'beta'
     # Target crosses tasks (substitute must stay in-task).
     (store / "curation.json").write_text(json.dumps({"alpha": {"0": beta_episode}}))
     with pytest.raises(ValueError, match="stay in-task"):
-        _load_selection_manifest(manifest, store)
+        _resolve_selection(sel, store)
     # Source is not a real episode of the task (stale/mistyped).
     (store / "curation.json").write_text(json.dumps({"alpha": {"999": 1}}))
     with pytest.raises(ValueError, match="not an episode"):
-        _load_selection_manifest(manifest, store)
-
-
-def test_generative_child_of_explicit_parent_is_rejected(tmp_path):
-    from rgrl.data import _load_selection_manifest
-
-    store = _write_generative_store(tmp_path)
-    parent = tmp_path / "explicit.json"
-    parent.write_text(
-        json.dumps(
-            {
-                "schema_version": 2,
-                "name": "explicit",
-                "source": {"dataset_id": "gen"},
-                "episode_ids": [0, 1],
-            }
-        )
-    )
-    child = tmp_path / "child.json"
-    child.write_text(
-        json.dumps(
-            {
-                "schema_version": 2,
-                "name": "child",
-                "source": {"dataset_id": "gen"},
-                "parent": "explicit.json",
-                "seed": 7,
-                "select": [{"task": "alpha", "count": 2}],
-            }
-        )
-    )
-    with pytest.raises(ValueError, match="explicit-episode_ids parent"):
-        _load_selection_manifest(child, store)
+        _resolve_selection(sel, store)
 
 
 @pytest.fixture

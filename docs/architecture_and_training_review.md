@@ -500,32 +500,30 @@ does not require the selected episodes to be physically rewritten. For a
 GPU-resident load, selected episodes can be concatenated once in memory. For
 the CPU/streaming path, reads remain against the original store.
 
-### Generative selection manifests (implemented)
+### Generative selections (implemented)
 
-The long integer lists are gone from `configs/data/*.yaml` and from the
-manifests themselves. A `configs/selections/*.json` manifest (schema_version 2)
-is a generative recipe resolved at load time by `rgrl/data.py` against the
-store's `tasks.json`:
+The long integer lists — and the separate `configs/selections/*.json` files —
+are gone. A data config carries an inline `selection:` block, a generative
+recipe `rgrl/data.py` resolves at load time against the store's `tasks.json`:
 
-```json
-{
-  "schema_version": 2,
-  "name": "set_table_plusleft",
-  "source": {"dataset_id": "droid_v2_trimmed"},
-  "parent": "set_table_baseline.json",
-  "seed": 42,
-  "select": [{"task": "prepare plate - milk left", "count": 60}],
-  "count": 180,
-  "expected_sha256": "..."
-}
+```yaml
+# configs/data/set_table_plusright.yaml
+selection:
+  seed: 42
+  select:
+    - {task: "prepare plate - milk right",  count: 60}
+    - {task: "prepare plate - milk middle", count: 60}
+    - {task: "prepare plate - milk right",  count: 60}   # +60 more, continued
+  count: 180
+  expected_sha256: "..."
 ```
 
-Hydra data configs reference it with `selection_path:
-configs/selections/set_table_plusleft.json`. Semantics: a `parent` continues the
-same seeded draw, so two selections over one task sample without replacement
-(the follow-up splits); the success curation (unsuccessful→successful episode
-swaps) is baked into the store's `curation.json`, validated to stay in-task; and
-an explicit-`episode_ids` escape hatch covers externally-curated sets with no
+Semantics: rules are drawn in order, and **listing a task again continues the
+same seeded draw without replacement** — so a follow-up split is just the
+baseline rules plus one extra same-task rule, fully self-contained (no
+cross-file parent). The success curation (unsuccessful→successful episode swaps)
+is baked into the store's `curation.json`, validated to stay in-task. An
+explicit-`episode_ids` escape hatch covers externally-curated sets with no
 regenerable rule (`prepare_tray`). `count` is a human-readable check and
 `expected_sha256` is an audit lock over the resolved set — it turns a silently
 changed resolution (missing curation, numpy RNG drift, edited seed/count) into a
