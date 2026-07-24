@@ -918,3 +918,31 @@ def test_completed_and_incompatible_resumes_are_guarded(tiny_store, tmp_path):
         _train_tiny(tiny_store, _tiny_train_cfg(out, steps=2, lr=2e-3))
     with pytest.raises(RuntimeError, match="fingerprint mismatch"):
         _train_tiny(tiny_store, _tiny_train_cfg(out, steps=2, warmup_steps=0))
+
+
+def test_write_sidecars_streaming_and_parallel_match_full_array(tmp_path):
+    # Fitting must be identical whether stats come in as one array or as
+    # per-episode chunks, and independent of the worker count.
+    import json
+
+    rng = np.random.default_rng(0)
+    chunks = {
+        "state": [rng.normal(size=(7, 3)).astype(np.float32) for _ in range(5)],
+        "action": [rng.normal(size=(7, 2)).astype(np.float32) for _ in range(5)],
+    }
+    full = {k: np.concatenate(v, axis=0) for k, v in chunks.items()}
+
+    def run(name, stats_keys, **kw):
+        d = tmp_path / name
+        d.mkdir()
+        # write_sidecars consumes the mapping, so hand it a fresh copy
+        payload = {
+            k: (v.copy() if isinstance(v, np.ndarray) else [c.copy() for c in v])
+            for k, v in stats_keys.items()
+        }
+        write_sidecars(d, stats_keys=payload, source="t", **kw)
+        return json.loads((d / "stats.json").read_text())
+
+    ref = run("full", full)
+    assert run("chunked", chunks, num_workers=1) == ref
+    assert run("parallel", chunks, num_workers=4) == ref

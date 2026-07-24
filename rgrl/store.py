@@ -20,6 +20,7 @@ silently mismatching the policy's encoder.
 from __future__ import annotations
 
 import json
+import os
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -213,11 +214,14 @@ class EpisodeStore:
 
 def write_sidecars(
     store_path: str | Path,
-    stats_keys: dict[str, np.ndarray],  # key -> (N, *shape) array, action/state only
+    # key -> (N, *shape) array, or a list of per-episode chunks to concatenate
+    # here (action/state only).
+    stats_keys: dict[str, np.ndarray | list[np.ndarray]],
     env_meta: dict | None = None,
     source: str = "",
     fps: float | None = None,
     norm_method: str = "minmax",
+    num_workers: int | None = None,
 ) -> None:
     """Call after the robo_dataset writer's finalize() to add rgrl's sidecars.
 
@@ -227,6 +231,15 @@ def write_sidecars(
 
     Kind classification (image vs. low_dim) is not stored here — it's
     declared by the caller's shape_meta config, not a fact about the store.
+
+    ``stats_keys`` values may be a full array or a list of per-episode chunks;
+    chunks are concatenated here and each key is dropped from the mapping once
+    fit, so the caller never has to hold a second concatenated copy of every
+    key at once (this consumes the passed mapping). Fitting is exact regardless
+    of chunking. Per-key fits are independent and NumPy's reductions/percentiles
+    release the GIL, so they run across up to ``num_workers`` threads
+    (default: one per key, capped at the CPU count). More workers hold more
+    keys' arrays at once; num_workers=1 minimizes peak memory.
     """
     from robo_dataset.normalization import fit_key
 
@@ -234,5 +247,23 @@ def write_sidecars(
     (path / _RGRL_META_FILE).write_text(
         json.dumps({"env_meta": env_meta or {}, "source": source, "fps": fps}, indent=1)
     )
-    stats = {k: fit_key(v.reshape(len(v), -1), norm_method).to_dict() for k, v in stats_keys.items()}
+
+    keys = list(stats_keys)
+
+    def fit_one(key: str) -> tuple[str, dict]:
+        chunks = stats_keys.pop(key)  # drop the reference so the array can free
+        arr = np.concatenate(chunks, axis=0) if isinstance(chunks, list) else chunks
+        del chunks
+        return key, fit_key(arr.reshape(len(arr), -1), norm_method).to_dict()
+
+    if num_workers is None:
+        num_workers = min(len(keys), os.cpu_count() or 1)
+    num_workers = max(1, num_workers)
+
+    if num_workers == 1 or len(keys) <= 1:
+        stats = dict(fit_one(k) for k in keys)
+    else:
+        with ThreadPoolExecutor(max_workers=num_workers) as pool:
+            stats = dict(pool.map(fit_one, keys))  # map preserves key order
+
     (path / _STATS_FILE).write_text(json.dumps(stats, indent=1))

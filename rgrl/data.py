@@ -248,7 +248,12 @@ def _verify_cache(cache_dir: Path, expected_doc: dict) -> None:
         )
 
 
-def load_store(source_cfg, target_shape_meta, cache_root: str | Path = "data/cache") -> EpisodeStore:
+def load_store(
+    source_cfg,
+    target_shape_meta,
+    cache_root: str | Path = "data/cache",
+    stats_workers: int | None = None,
+) -> EpisodeStore:
     """Convert (if needed) and open the store for `source_cfg` against
     `target_shape_meta`. Safe to call repeatedly (e.g. once at train time,
     once at eval time) — later calls with identical inputs hit the cache.
@@ -256,7 +261,14 @@ def load_store(source_cfg, target_shape_meta, cache_root: str | Path = "data/cac
     Two source kinds: `path` (a robomimic HDF5 file, converted into a fresh
     rgrl zarr store) or `store_path` (a dataset already in a robo_dataset
     native format, e.g. a DROID VideoStore — no re-encode needed, see
-    `_convert_from_store`)."""
+    `_convert_from_store`).
+
+    `stats_workers` sets the normalizer-fit thread pool at conversion time;
+    None falls back to the RGRL_STATS_WORKERS env var, then to one thread per
+    key (capped at the CPU count). Only matters on a cache miss."""
+    if stats_workers is None:
+        env_workers = os.environ.get("RGRL_STATS_WORKERS")
+        stats_workers = int(env_workers) if env_workers else None
     source_cfg = resolve_source_config(source_cfg)
     target_shape_meta = _to_plain(target_shape_meta)
     source_kind = "store" if "store_path" in source_cfg else "hdf5"
@@ -285,13 +297,13 @@ def load_store(source_cfg, target_shape_meta, cache_root: str | Path = "data/cac
                     f"[load_store] cache miss {cache_dir} -- linking "
                     f"{source_cfg['store_path']}"
                 )
-                _convert_from_store(source_cfg, target_shape_meta, tmp_dir)
+                _convert_from_store(source_cfg, target_shape_meta, tmp_dir, stats_workers)
             else:
                 log.info(
                     f"[load_store] cache miss {cache_dir} -- converting "
                     f"{source_cfg['path']}"
                 )
-                _convert(source_cfg, target_shape_meta, tmp_dir)
+                _convert(source_cfg, target_shape_meta, tmp_dir, stats_workers)
             (tmp_dir / _MANIFEST_FILE).write_text(
                 json.dumps(doc, indent=1, sort_keys=True)
             )
@@ -305,7 +317,9 @@ def load_store(source_cfg, target_shape_meta, cache_root: str | Path = "data/cac
     return EpisodeStore(cache_dir, target_shape_meta)
 
 
-def _convert(source_cfg: dict, target_shape_meta: dict, out: Path) -> None:
+def _convert(
+    source_cfg: dict, target_shape_meta: dict, out: Path, num_workers: int | None = None
+) -> None:
     from robo_dataset.backends.hdf5 import RobomimicHDF5Store
     from robo_dataset.backends.zarr_backend import ZarrStoreWriter
     from robo_dataset.convert import convert as robo_convert
@@ -336,7 +350,8 @@ def _convert(source_cfg: dict, target_shape_meta: dict, out: Path) -> None:
         return out_ep
 
     robo_convert(src, dst, transform=transform_and_collect, verbose=True)
-    stats_keys = {k: np.concatenate(v, axis=0) for k, v in stats_accum.items()}
+    # Hand the per-episode chunk lists straight to write_sidecars, which
+    # concatenates and frees one key at a time -- no second all-keys copy.
 
     with h5py.File(source_cfg["path"], "r") as f:
         env_meta = json.loads(f["data"].attrs["env_args"]) if "env_args" in f["data"].attrs else {}
@@ -350,11 +365,18 @@ def _convert(source_cfg: dict, target_shape_meta: dict, out: Path) -> None:
     env_meta["abs_action"] = source_cfg.get("abs_action", False)
 
     write_sidecars(
-        out, stats_keys=stats_keys, env_meta=env_meta, source=str(source_cfg["path"]), fps=20.0
+        out,
+        stats_keys=stats_accum,
+        env_meta=env_meta,
+        source=str(source_cfg["path"]),
+        fps=20.0,
+        num_workers=num_workers,
     )
 
 
-def _convert_from_store(source_cfg: dict, target_shape_meta: dict, out: Path) -> None:
+def _convert_from_store(
+    source_cfg: dict, target_shape_meta: dict, out: Path, num_workers: int | None = None
+) -> None:
     """Adapt a dataset already in a robo_dataset-native format (zarr, video,
     lerobot, ...) for rgrl.
 
@@ -444,4 +466,5 @@ def _convert_from_store(source_cfg: dict, target_shape_meta: dict, out: Path) ->
         env_meta={**source_cfg.get("env_meta", {}), "abs_action": source_cfg.get("abs_action", False)},
         source=str(store_path),
         fps=fps,
+        num_workers=num_workers,
     )

@@ -119,7 +119,7 @@ def test_failed_conversion_never_publishes_a_partial_cache(
     cache_root = tmp_path / "cache"
     original_convert = data_module._convert
 
-    def fail_after_partial_write(source, target, out):
+    def fail_after_partial_write(source, target, out, num_workers=None):
         out.mkdir(parents=True)
         (out / "partial").write_text("injected")
         raise RuntimeError("injected conversion failure")
@@ -390,3 +390,14 @@ def test_short_prefix_collision_detected_by_full_hash(tmp_path):
     empty = tmp_path / "empty"
     empty.mkdir()
     assert _is_short_prefix_collision(empty, {"hash": "aaaa"}) is False
+
+
+def test_stats_workers_do_not_change_stats(synthetic_hdf5, tmp_path):
+    # Parallel per-key fitting must produce byte-identical stats.
+    source_cfg = _source_cfg(synthetic_hdf5)
+    target_meta = source_cfg["shape_meta"]
+    serial = load_store(source_cfg, target_meta, cache_root=tmp_path / "c1", stats_workers=1)
+    parallel = load_store(source_cfg, target_meta, cache_root=tmp_path / "c4", stats_workers=4)
+    a = json.loads((serial.path / "stats.json").read_text())
+    b = json.loads((parallel.path / "stats.json").read_text())
+    assert a == b and a  # non-empty and identical
