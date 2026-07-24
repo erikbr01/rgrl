@@ -41,6 +41,16 @@ log = logging.getLogger(__name__)
 
 CHECKPOINT_SCHEMA_VERSION = 1
 _RESUME_MODES = {"never", "auto", "required", "extend"}
+# torch.compile modes we expose. All produce the same optimizer update
+# mathematically -- they only trade compile time for kernel selection / graph
+# replay -- so compile_mode is a pure execution knob (excluded from the resume
+# fingerprint below). "default" is the pre-max-autotune historical behavior.
+_COMPILE_MODES = {
+    "default",
+    "reduce-overhead",
+    "max-autotune",
+    "max-autotune-no-cudagraphs",
+}
 
 
 @dataclass
@@ -77,6 +87,11 @@ class TrainConfig:
     device_memory_reserve_gb: float = 4.0
 
     compile: bool = True
+    # torch.compile mode for policy.loss. max-autotune trades a longer one-time
+    # compile (aggressive kernel autotuning + cudagraphs) for ~5% faster steps;
+    # "default" is the historical mode. Ignored when compile=False. See
+    # _COMPILE_MODES. This is training-only and never touches inference compile.
+    compile_mode: str = "max-autotune"
     bf16: bool = True
     ema_power: float = 0.75
     device: str = "cuda"
@@ -121,6 +136,10 @@ def resolve_recipe(cfg: TrainConfig) -> ResolvedRecipe:
         raise ValueError(f"resume must be one of {sorted(_RESUME_MODES)}, got {cfg.resume!r}")
     if cfg.trace_steps < 0:
         raise ValueError(f"trace_steps must be >= 0, got {cfg.trace_steps}")
+    if cfg.compile_mode not in _COMPILE_MODES:
+        raise ValueError(
+            f"compile_mode must be one of {sorted(_COMPILE_MODES)}, got {cfg.compile_mode!r}"
+        )
 
     return ResolvedRecipe(
         steps=steps,
@@ -183,6 +202,7 @@ def _resume_spec(
         "save_every",
         "resume",
         "resume_allow_legacy",
+        "compile_mode",
         "wandb_project",
         "wandb_name",
         "profile",
@@ -215,11 +235,17 @@ def _capture_rng_state() -> dict:
 def _restore_rng_state(state: dict) -> None:
     random.setstate(state["python"])
     np.random.set_state(state["numpy"])
-    torch.set_rng_state(state["torch_cpu"])
+    # RNG states must be CPU ByteTensors: torch.{,cuda.}set_rng_state reject
+    # anything else. The checkpoint is loaded with map_location=device, which
+    # moves these ByteTensors onto the GPU, so coerce them back to CPU before
+    # restoring -- otherwise every CUDA resume fails with "RNG state must be a
+    # torch.ByteTensor". A no-op when they were loaded on CPU already.
+    torch.set_rng_state(state["torch_cpu"].cpu())
     saved_cuda = state.get("torch_cuda")
     if saved_cuda is not None:
         if not torch.cuda.is_available():
             raise RuntimeError("checkpoint contains CUDA RNG state but CUDA is unavailable")
+        saved_cuda = [s.cpu() for s in saved_cuda]
         current = torch.cuda.device_count()
         if len(saved_cuda) == current:
             torch.cuda.set_rng_state_all(saved_cuda)
@@ -513,7 +539,7 @@ def _train(
     fresh_rng = _capture_rng_state() if checkpoint is None else None
 
     if cfg.compile:
-        policy.loss = torch.compile(policy.loss)
+        policy.loss = torch.compile(policy.loss, mode=cfg.compile_mode)
 
     run = None
     if cfg.wandb_project:

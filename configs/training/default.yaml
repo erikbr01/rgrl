@@ -19,6 +19,12 @@ dataloader_workers: 0
 data_mode: auto
 device_memory_reserve_gb: 4.0
 compile: true
+# compile_mode: default        # previous default (fast compile, no autotuning)
+# max-autotune: ~5% faster steady-state steps (measured, image DiT) for a
+# longer one-time compile. Options: default | reduce-overhead |
+# max-autotune | max-autotune-no-cudagraphs. Training-only; inference compile
+# is configured separately and unaffected.
+compile_mode: max-autotune
 bf16: true
 ema_power: 0.75
 device: cuda

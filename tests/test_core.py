@@ -900,6 +900,22 @@ def test_interrupted_resume_is_bit_exact(tiny_store, tmp_path, monkeypatch):
     assert not list((tmp_path / "interrupted").glob(".*.tmp"))
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+def test_cuda_resume_restores_rng_state(tiny_store, tmp_path):
+    # Regression: the checkpoint is loaded with map_location=device, which moves
+    # the saved RNG ByteTensors onto the GPU. torch.{,cuda.}set_rng_state require
+    # CPU ByteTensors, so a CUDA resume used to die in _restore_rng_state with
+    # "RNG state must be a torch.ByteTensor". The whole point of this test is to
+    # exercise the map_location=cuda path the CPU-device resume tests never hit.
+    out = tmp_path / "cuda_resume"
+    _train_tiny(tiny_store, _tiny_train_cfg(out, device="cuda", steps=3, save_every=3))
+    resumed = _train_tiny(
+        tiny_store,
+        _tiny_train_cfg(out, device="cuda", steps=6, save_every=3, resume="extend"),
+    )
+    assert resumed["step"] == 6
+
+
 def test_completed_and_incompatible_resumes_are_guarded(tiny_store, tmp_path):
     out = tmp_path / "guarded"
     cfg = _tiny_train_cfg(out, steps=2, save_every=2)
