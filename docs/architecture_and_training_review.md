@@ -523,8 +523,9 @@ same seeded draw without replacement** — so a follow-up split is just the
 baseline rules plus one extra same-task rule, fully self-contained (no
 cross-file parent). The success curation (unsuccessful→successful episode swaps)
 is baked into the store's `curation.json`, validated to stay in-task. An
-explicit-`episode_ids` escape hatch covers externally-curated sets with no
-regenerable rule (`prepare_tray`). `count` is a human-readable check and
+explicit-`episode_ids` escape hatch remains for externally-curated sets with no
+regenerable rule (none of the current configs need it). `count` is a
+human-readable check and
 `expected_sha256` is an audit lock over the resolved set — it turns a silently
 changed resolution (missing curation, numpy RNG drift, edited seed/count) into a
 hard error. The intended algebra (baseline inclusion, exactly 60 additions,
