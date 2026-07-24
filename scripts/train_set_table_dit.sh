@@ -4,7 +4,7 @@ set -euo pipefail
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-1}"
 exec "$(dirname "${BASH_SOURCE[0]}")/train_droid_flow.sh" \
   set_table_baseline set_table_baseline \
-  51200000 25600000 \
+  800000 400000 \
   set-table-droid set_table_baseline_dit \
   runs/set_table_baseline_dit \
   "$@"

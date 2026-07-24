@@ -66,11 +66,11 @@ uv run python -m rgrl.convert_robomimic \
     --hdf5-path .../lift/ph/image.hdf5 --out data/stores/lift_ph_image \
     --obs-keys agentview_image robot0_eye_in_hand_image robot0_eef_pos robot0_eef_quat robot0_gripper_qpos
 
-# train rectified flow (the default)
+# train rectified flow (the default); length/cadence are in optimizer steps
 scripts/train.sh data=tool_hang_state target=tool_hang_state \
-  training.steps=null training.train_samples=7680000
+  training.steps=30000
 
-# large-batch, equal-sample state recipe
+# large-batch state recipe (1/4 the steps -> same data as the bs=256 default)
 scripts/train.sh data=tool_hang_state target=tool_hang_state training=bs1024
 
 # diffusion remains available for compatibility/ablations

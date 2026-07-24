@@ -47,27 +47,21 @@ _RESUME_MODES = {"never", "auto", "required", "extend"}
 class TrainConfig:
     out: Path = Path("runs/dev")
 
-    # Exactly one of steps/train_samples controls the run. ``steps`` remains
-    # for compatibility; new recipes should use train_samples so changing the
-    # batch size cannot accidentally change the amount of training.
-    steps: int | None = 30_000
-    train_samples: int | None = None
+    # Training length and every cadence are in optimizer steps (gradient
+    # updates); batch_size sets how much data each step consumes.
+    steps: int = 30_000
     batch_size: int = 256
     lr: float = 1e-4
     weight_decay: float = 1e-6
     betas: tuple[float, float] = (0.95, 0.999)
     warmup_steps: int = 500
-    warmup_samples: int | None = None
     seed: int = 0
     val_seed: int = 17_029
 
     val_episodes: int = 4
     val_every: int = 2_000
-    val_every_samples: int | None = None
     log_every: int = 100
-    log_every_samples: int | None = None
     save_every: int = 10_000
-    save_every_samples: int | None = None
 
     # ``auto`` resumes only the same target recipe. Increasing the target is
     # an intentional state transition and requires ``extend``.
@@ -95,7 +89,6 @@ class TrainConfig:
 @dataclass(frozen=True)
 class ResolvedRecipe:
     steps: int
-    train_samples: int
     warmup_steps: int
     log_every: int
     val_every: int
@@ -117,31 +110,13 @@ def _positive(name: str, value: int) -> int:
     return value
 
 
-def _sample_interval(sample_value: int | None, step_value: int, batch_size: int, name: str) -> int:
-    if sample_value is not None:
-        return math.ceil(_positive(name, sample_value) / batch_size)
-    return _positive(name.replace("_samples", ""), step_value)
-
-
 def resolve_recipe(cfg: TrainConfig) -> ResolvedRecipe:
-    """Resolve sample- or step-based user units to the loop's integer steps."""
+    """Validate the step-based recipe and surface the loop's cadences."""
     _positive("batch_size", cfg.batch_size)
-    if (cfg.steps is None) == (cfg.train_samples is None):
-        raise ValueError("set exactly one of training.steps or training.train_samples")
-    if cfg.train_samples is not None:
-        train_samples = _positive("train_samples", cfg.train_samples)
-        steps = math.ceil(train_samples / cfg.batch_size)
-    else:
-        steps = _positive("steps", int(cfg.steps))
-        train_samples = steps * cfg.batch_size
-
-    warmup_steps = (
-        math.ceil(_positive("warmup_samples", cfg.warmup_samples) / cfg.batch_size)
-        if cfg.warmup_samples is not None
-        else max(0, cfg.warmup_steps)
-    )
+    steps = _positive("steps", int(cfg.steps))
+    warmup_steps = max(0, cfg.warmup_steps)
     if warmup_steps > steps:
-        raise ValueError(f"warmup resolves to {warmup_steps} steps, beyond total {steps}")
+        raise ValueError(f"warmup_steps={warmup_steps} is beyond total steps={steps}")
     if cfg.resume not in _RESUME_MODES:
         raise ValueError(f"resume must be one of {sorted(_RESUME_MODES)}, got {cfg.resume!r}")
     if cfg.trace_steps < 0:
@@ -149,17 +124,10 @@ def resolve_recipe(cfg: TrainConfig) -> ResolvedRecipe:
 
     return ResolvedRecipe(
         steps=steps,
-        train_samples=train_samples,
         warmup_steps=warmup_steps,
-        log_every=_sample_interval(
-            cfg.log_every_samples, cfg.log_every, cfg.batch_size, "log_every_samples"
-        ),
-        val_every=_sample_interval(
-            cfg.val_every_samples, cfg.val_every, cfg.batch_size, "val_every_samples"
-        ),
-        save_every=_sample_interval(
-            cfg.save_every_samples, cfg.save_every, cfg.batch_size, "save_every_samples"
-        ),
+        log_every=_positive("log_every", cfg.log_every),
+        val_every=_positive("val_every", cfg.val_every),
+        save_every=_positive("save_every", cfg.save_every),
     )
 
 
@@ -210,13 +178,9 @@ def _resume_spec(
     for key in {
         "out",
         "steps",
-        "train_samples",
         "log_every",
-        "log_every_samples",
         "val_every",
-        "val_every_samples",
         "save_every",
-        "save_every_samples",
         "resume",
         "resume_allow_legacy",
         "wandb_project",
@@ -417,7 +381,7 @@ def _train(
     log.info(
         f"policy={type(policy).__name__} params={n_params / 1e6:.1f}M "
         f"samples={data.num_samples} data_on={data.data_device} "
-        f"store={store.nbytes() / 1e9:.2f}GB target_samples={recipe.train_samples}"
+        f"store={store.nbytes() / 1e9:.2f}GB target_steps={recipe.steps}"
     )
     ema = EMA(policy, power=cfg.ema_power)
 
@@ -588,7 +552,6 @@ def _train(
             "step": step,
             "samples_seen": step * cfg.batch_size,
             "target_steps": recipe.steps,
-            "target_samples": recipe.train_samples,
             "wandb_id": wandb_id,
         }
         path = _atomic_save_checkpoint(out, step, payload)

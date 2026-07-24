@@ -2,8 +2,12 @@
 # Shared DROID DiT flow-matching recipe.
 #
 # Usage:
-#   train_droid_flow.sh DATA TARGET TRAIN_SAMPLES SAVE_EVERY_SAMPLES \
+#   train_droid_flow.sh DATA TARGET STEPS SAVE_EVERY \
 #     WANDB_PROJECT WANDB_NAME OUT [hydra overrides...]
+#
+# STEPS / SAVE_EVERY are optimizer steps. They are sized for the default
+# DROID_BATCH_SIZE; if you override the batch size, rescale them so the model
+# still sees the intended amount of data.
 #
 # Environment overrides:
 #   DROID_BATCH_SIZE=64
@@ -15,14 +19,14 @@
 set -euo pipefail
 
 if (( $# < 7 )); then
-  echo "usage: $0 DATA TARGET TRAIN_SAMPLES SAVE_EVERY_SAMPLES WANDB_PROJECT WANDB_NAME OUT [overrides...]" >&2
+  echo "usage: $0 DATA TARGET STEPS SAVE_EVERY WANDB_PROJECT WANDB_NAME OUT [overrides...]" >&2
   exit 2
 fi
 
 data_config=$1
 target_config=$2
-train_samples=$3
-save_every_samples=$4
+steps=$3
+save_every=$4
 wandb_project=$5
 wandb_name=$6
 run_out=$7
@@ -42,8 +46,7 @@ exec uv run --extra video --extra wandb python train.py \
   training.dataloader_workers=0 \
   training.wandb_project="$wandb_project" \
   training.wandb_name="$wandb_name" \
-  training.save_every_samples="$save_every_samples" \
-  training.steps=null \
-  training.train_samples="$train_samples" \
+  training.steps="$steps" \
+  training.save_every="$save_every" \
   out="$run_out" \
   "$@"

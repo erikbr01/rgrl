@@ -21,7 +21,7 @@ The `robo_dataset` work is captured in local submodule commit `64bb0a5`
 | Checkpoint safety | A checkpoint is serialized once, fsynced, atomically renamed, and published through an atomically replaced relative `latest.pt` symlink. Completed/lower-target runs cannot overwrite progress; extensions are explicit. |
 | Legacy inference | Pre-shape-meta diffusion and flow checkpoints load through an isolated compatibility module that requires and validates the original store sidecars. It never guesses image modalities from dtype. |
 | Validation | Validation uses an isolated fixed RNG stream, pools a true element-weighted mean (accumulating the squared-error sum and valid-element count, so the variable prefix denominator and a short final batch are weighted correctly), validates split sizes, and does not change subsequent training updates. |
-| Recipe semantics | Training, warmup, logging, validation, and checkpoint cadence can all be expressed in samples. The DROID recipes use explicit 51.2M/76.8M sample budgets. |
+| Recipe semantics | Training length, warmup, logging, validation, and checkpoint cadence are all expressed in optimizer steps (a sample-budget front-end was tried and dropped as redundant; `batch_size` sets data-per-step). The big-batch recipe uses 1/4 the steps of the bs=256 default so both see the same data. |
 | Sampling | Uniform/weighted sampling is a separate Hydra group. Resident and shared-memory modes use the same deterministic epoch order and resume from the exact next batch. |
 | Episode subsets | DROID subset IDs moved into versioned manifests with parent/addition composition and executable provenance checks. `EpisodeView` maps logical episodes to the original physical store without copying or re-encoding videos. |
 | Conversion cache | Cache identity uses an explicit schema, source metadata fingerprint, resolved selection contents, and target schema. Per-key locks, temporary siblings, validation, directory fsync, and atomic publish prevent partial caches. |
@@ -176,14 +176,14 @@ The steady-state ToolHang comparison uses the same compiled flow policy:
 ```bash
 CUDA_VISIBLE_DEVICES=0 uv run python train.py \
   policy=flow data=tool_hang_state target=tool_hang_state \
-  training.steps=1200 training.train_samples=null \
+  training.steps=1200 \
   training.val_episodes=0 training.log_every=200 training.save_every=1200 \
   training.profile=false training.resume=never out=/tmp/toolhang_flow_bs256
 
 CUDA_VISIBLE_DEVICES=0 uv run python train.py \
   policy=flow data=tool_hang_state target=tool_hang_state training=bs1024 \
-  training.train_samples=1228800 training.val_episodes=0 \
-  training.log_every_samples=204800 training.save_every_samples=1228800 \
+  training.steps=1200 training.val_episodes=0 \
+  training.log_every=200 training.save_every=1200 \
   training.profile=false training.resume=never out=/tmp/toolhang_flow_bs1024
 ```
 
