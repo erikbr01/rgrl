@@ -1,0 +1,51 @@
+name: set_table_plusmiddle
+# Same rebuilt store as configs/data/set_table_baseline.yaml. Adds 60
+# more, disjoint success=True "prepare plate - milk middle" episodes on
+# top of the baseline's 60 right + 60 middle (180 total: 60 right + 120
+# middle) -- policy_graphs' generate_set_table_episode_selection.py
+# (--seed 42) guarantees the baseline's indices are a strict subset of
+# this split's, matching diffusion_policy's set_table_v2_plusmiddle
+# config. Merged and sorted into a flat list (see
+# configs/data/set_table_baseline.yaml).
+store_path: /mnt/ssdB/erik/droid_converted_v2_trimmed
+abs_action: false
+rename: {}
+episode_ids:
+  [
+    579, 582, 587, 590, 591, 592, 593, 594, 595, 599, 601, 602, 604, 605,
+    606, 607, 608, 612, 613, 619, 621, 623, 624, 626, 628, 631, 633, 637,
+    639, 643, 645, 649, 650, 652, 653, 657, 661, 662, 663, 664, 667, 669,
+    670, 671, 672, 673, 674, 675, 680, 682, 683, 685, 687, 688, 689, 691,
+    692, 694, 697, 698, 700, 702, 703, 704, 707, 709, 712, 714, 717, 718,
+    719, 720, 723, 725, 726, 730, 731, 733, 734, 737, 738, 742, 746, 751,
+    758, 760, 761, 763, 765, 766, 767, 769, 770, 773, 776, 778, 779, 780,
+    782, 783, 784, 786, 790, 791, 793, 795, 800, 803, 804, 805, 806, 808,
+    810, 812, 813, 815, 816, 819, 826, 828, 830, 832, 833, 834, 835, 836,
+    838, 840, 844, 845, 848, 850, 854, 855, 856, 861, 862, 863, 864, 866,
+    869, 870, 876, 878, 879, 881, 882, 883, 1107, 1109, 1110, 1114, 1115,
+    1117, 1118, 1119, 1121, 1122, 1123, 1126, 1127, 1129, 1132, 1133, 1135,
+    1136, 1137, 1138, 1139, 1140, 1142, 1143, 1144, 1145, 1146, 1148, 1149,
+    1151, 1152, 1153,
+  ]
+shape_meta:
+  obs:
+    wrist_image_left:
+      shape: [180, 320, 3]
+      type: rgb
+      channel_order: rgb
+    wrist_image_right:
+      shape: [180, 320, 3]
+      type: rgb
+      channel_order: rgb
+    exterior_image_1_left:
+      shape: [180, 320, 3]
+      type: rgb
+      channel_order: rgb
+    joint_positions:
+      shape: [7]
+      type: low_dim
+    gripper_position:
+      shape: [1]
+      type: low_dim
+  action:
+    shape: [8]

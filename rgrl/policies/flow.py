@@ -3,7 +3,8 @@ simpler objective, ~10 Euler steps at inference with no scheduler at all."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Callable
 
 import torch
 import torch.nn.functional as F
@@ -14,6 +15,7 @@ from rgrl.nets.unet1d import ConditionalUnet1D
 from rgrl.normalize import Normalizer
 from rgrl.policies.base import ObsEncoder
 from rgrl.store import EpisodeStore
+from rgrl.transforms import apply_pipeline, data_transforms_pipeline, default_transforms
 
 
 @dataclass
@@ -27,7 +29,8 @@ class FlowConfig:
     n_action_steps: int = 8
     down_dims: tuple[int, ...] = (256, 512, 1024)
     num_kp: int = 32
-    image_hw: tuple[int, int] | None = (76, 76)  # vision encoder's input size
+    # See DiffusionConfig.data_transforms -- same scheme.
+    data_transforms: list[Callable] = field(default_factory=default_transforms)
     inference_steps: int = 10
     timestep_scale: float = 1000.0  # sinusoidal embedding resolution for t in [0,1]
     # Train-time RTC — same scheme and semantics as DiffusionConfig's
@@ -44,7 +47,8 @@ class FlowPolicy(nn.Module):
         super().__init__()
         self.cfg = FlowConfig(**kwargs)
         cfg = self.cfg
-        self.enc = ObsEncoder(store, cfg.obs_horizon, cfg.image_hw, num_kp=cfg.num_kp)
+        self.data_transforms_pipeline, target_hw = data_transforms_pipeline(store, cfg.data_transforms)
+        self.enc = ObsEncoder(store, cfg.obs_horizon, target_hw, num_kp=cfg.num_kp)
         self.act_dim = store.meta.keys["action"].shape[0]
         self.action_norm = Normalizer(KeyNormalizer.from_dict(store.stats["action"]))
         # +1 input channel when trained for RTC (the prefix mask), exactly as
@@ -128,6 +132,7 @@ class FlowPolicy(nn.Module):
     @torch.no_grad()
     def predict_action(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
         cfg = self.cfg
+        batch = apply_pipeline(self.data_transforms_pipeline, batch)
         cond = self.enc(batch)
         b = cond.shape[0]
         x = torch.randn(b, cfg.horizon, self.act_dim, device=cond.device, dtype=cond.dtype)
@@ -156,6 +161,7 @@ class FlowPolicy(nn.Module):
                 f"{cfg.max_action_prefix} -- longer prefixes are out of the training "
                 "distribution (lower open_loop_horizon or raise replan_step)"
             )
+        batch = apply_pipeline(self.data_transforms_pipeline, batch)
         cond = self.enc(batch)
         b = cond.shape[0]
         x = torch.randn(b, cfg.horizon, self.act_dim, device=cond.device, dtype=cond.dtype)

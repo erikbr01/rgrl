@@ -139,6 +139,7 @@ class _Args:
     warmup_batch_size: int = 1  # batch size to compile/warm up for; match your clients' actual B
     cuda_graph: bool = False  # capture the whole predict_action call -- see rgrl/inference/cuda_graph.py
     bf16: bool = False
+    tf32: bool = True  # torch.set_float32_matmul_precision("high")
     use_ema: bool = True
     capture_layers: tuple[str, ...] = ()  # dotted submodule paths -- see rgrl/inference/activations.py
 
@@ -151,6 +152,7 @@ def main() -> None:
     inference = InferenceConfig(
         use_ema=args.use_ema,
         bf16=args.bf16,
+        tf32=args.tf32,
         compile=args.compile,
         warmup_batch_size=args.warmup_batch_size,
         cuda_graph=args.cuda_graph,

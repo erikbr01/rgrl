@@ -32,11 +32,12 @@ from pathlib import Path
 import torch
 from torch import nn
 
-from rgrl.dataset import GpuSequenceDataset, Windows
+from rgrl.dataset import Windows, build_dataset
 from rgrl.ema import EMA
 from rgrl.logutil import log_to_file
 from rgrl.profiler import SectionProfiler, chrome_trace
 from rgrl.store import EpisodeStore
+from rgrl.transforms import apply_pipeline
 
 log = logging.getLogger(__name__)
 
@@ -57,6 +58,20 @@ class TrainConfig:
     val_every: int = 2_000
     log_every: int = 100
     save_every: int = 10_000
+    # build_dataset() falls back to a CpuSequenceDataset (real DataLoader,
+    # CPU-resident) once a split's own frames exceed this -- see
+    # rgrl/dataset.py. The default (20GB) assumes a data-hungry-but-
+    # small-model recipe; large models (e.g. DiT depth=8+) need more
+    # headroom than that leaves, so lower this explicitly rather than
+    # shrinking batch_size just to fit a store that happens to be small
+    # enough to stay GPU-resident by default.
+    pin_fallback_gb: float = 20.0
+    # Once pin_fallback_gb triggers, the resulting CpuSequenceDataset is
+    # always driven by a real DataLoader -- this just sets its worker
+    # count. 0 (default) is still correct and safe (single-process,
+    # synchronous fetch via the same Dataset), just without the
+    # cross-process gather parallelism a positive count buys.
+    dataloader_workers: int = 0
 
     compile: bool = True
     bf16: bool = True
@@ -107,11 +122,16 @@ def _train(
     torch.backends.cudnn.benchmark = True
 
     windows = Windows(obs_horizon=policy.cfg.obs_horizon, horizon=policy.cfg.horizon)
-    data = GpuSequenceDataset(
-        store, windows, device, cfg.val_episodes, "train", sample_weights=sample_weights
+    data = build_dataset(
+        store, windows, device, cfg.val_episodes, "train",
+        pin_fallback_gb=cfg.pin_fallback_gb, dataloader_workers=cfg.dataloader_workers,
+        sample_weights=sample_weights,
     )
     val = (
-        GpuSequenceDataset(store, windows, device, cfg.val_episodes, "val")
+        build_dataset(
+            store, windows, device, cfg.val_episodes, "val",
+            pin_fallback_gb=cfg.pin_fallback_gb, dataloader_workers=cfg.dataloader_workers,
+        )
         if cfg.val_episodes
         else None
     )
@@ -172,6 +192,12 @@ def _train(
             "store": store_cfg,
             "target": target_cfg,
             "policy": policy_cfg,
+            # a fact about the training data (e.g. robosuite's env_name/
+            # env_kwargs), not the policy's schema -- saved here so a
+            # checkpoint is enough on its own for a robomimic sim rollout,
+            # with no need to reopen the original dataset at eval time (see
+            # rgrl.inference.checkpoint._ConfigStore).
+            "env_meta": store.meta.env_meta,
         }
 
     (out / "config.json").write_text(json.dumps(full_config(), default=str, indent=1))
@@ -201,7 +227,7 @@ def _train(
     def one_step(step: int):
         nonlocal loss_sum
         with prof("data"):
-            batch = next(batches)
+            batch = apply_pipeline(policy.data_transforms_pipeline, next(batches))
         with prof("fwd"), autocast:
             loss = policy.compute_loss(batch)
         with prof("bwd"):
@@ -259,7 +285,7 @@ def _train(
             policy.eval()
             with torch.no_grad(), autocast:
                 vlosses = [
-                    policy.compute_loss(val.gather(ids))
+                    policy.compute_loss(apply_pipeline(policy.data_transforms_pipeline, val.gather(ids)))
                     for ids in torch.arange(val.num_samples).split(cfg.batch_size)
                 ]
             vloss = torch.stack(vlosses).mean().item()

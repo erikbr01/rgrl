@@ -1,0 +1,7 @@
+_target_: rgrl.inference.envs.droid.build
+_partial_: true
+action_space: joint_velocity
+control_hz: 15.0
+position_gain: 1.0
+max_joint_velocity: null
+dry_run: false

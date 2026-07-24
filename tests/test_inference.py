@@ -9,7 +9,8 @@ from torch import nn
 
 from rgrl.inference.activations import ActivationCapture
 from rgrl.inference.obs_window import RollingObsWindow
-from rgrl.inference.policy_client import PolicyBase
+from rgrl.inference.policy_client import HttpPolicy, LocalPolicy, PolicyBase, WebSocketPolicy
+from rgrl.inference.rollout_cli import build_policy
 from rgrl.inference.runner import InferenceMode, Runner
 from rgrl.inference.wire import decode_batch, encode_batch
 
@@ -339,3 +340,53 @@ def test_activation_capture_remove_stops_hooking():
     capture.remove()
     policy(torch.randn(2, 4))
     assert capture.pop() == {}
+
+
+# rollout_cli.build_policy: the one dispatch shared by eval.py, run_realtime.py,
+# and collect_rollouts.py -- ws(s):// / http(s):// / ckpt / default-to-local-server.
+# None of these constructors connect eagerly (HttpPolicy/WebSocketPolicy just store
+# config; LocalPolicy is the one exception, so its branch uses a real dry ckpt=None
+# case plus a monkeypatch for the ckpt-given case).
+
+
+def test_build_policy_ws_url_returns_websocket_policy():
+    policy = build_policy(ckpt=None, server="ws://gpubox:8000", inference=None, external_camera="ext2")
+    assert isinstance(policy, WebSocketPolicy)
+
+
+def test_build_policy_wss_url_returns_websocket_policy():
+    policy = build_policy(ckpt=None, server="wss://gpubox:8000", inference=None)
+    assert isinstance(policy, WebSocketPolicy)
+
+
+def test_build_policy_http_url_returns_http_policy():
+    policy = build_policy(ckpt=None, server="http://gpubox:5001", inference=None)
+    assert isinstance(policy, HttpPolicy)
+    assert policy._url == "http://gpubox:5001"
+
+
+def test_build_policy_no_ckpt_no_server_defaults_to_local_policy_server():
+    policy = build_policy(ckpt=None, server=None, inference=None)
+    assert isinstance(policy, HttpPolicy)
+    assert policy._url == "http://127.0.0.1:5001"
+
+
+def test_build_policy_ckpt_given_returns_local_policy(monkeypatch):
+    captured = {}
+
+    class _FakeCfg:
+        obs_horizon = 2
+
+    class _FakePolicy:
+        cfg = _FakeCfg()
+
+    def fake_load_policy(ckpt_path, inference, device):
+        captured["ckpt_path"] = ckpt_path
+        captured["device"] = device
+        return _FakePolicy(), object(), 0
+
+    monkeypatch.setattr("rgrl.inference.checkpoint.load_policy", fake_load_policy)
+    policy = build_policy(ckpt="runs/x/latest.pt", server=None, inference=None, device="cpu")
+    assert isinstance(policy, LocalPolicy)
+    assert str(captured["ckpt_path"]) == "runs/x/latest.pt"
+    assert captured["device"] == torch.device("cpu")

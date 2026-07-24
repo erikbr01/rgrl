@@ -11,7 +11,12 @@ depth: 8
 num_heads: 8
 mlp_ratio: 4.0
 num_kp: 32
-image_hw: [76, 76]
+data_transforms:
+  - _target_: rgrl.transforms.CropTransform
+    _partial_: true  # image_keys, unknown until the store loads, is bound by ObsEncoder
+    size: [76, 76]  # vision encoder's input size
+    pad: 0
+    per_timestep: true
 inference_steps: 10
 max_action_prefix: 7  # full horizon tail (16 - 1 - 8); 0 disables prefix training
 prefix_conditioning_prob: 1.0

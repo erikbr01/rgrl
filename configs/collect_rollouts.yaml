@@ -1,0 +1,30 @@
+defaults:
+  - inference: diffusion
+  - rollout_env: droid
+  - override hydra/job_logging: none
+  - override hydra/hydra_logging: none
+  - _self_
+
+hydra:
+  job:
+    chdir: false
+  output_subdir: null
+  run:
+    dir: .
+
+output_dir: ???
+ckpt: null
+server: null  # http(s)://host:port; unset + no ckpt -> default local policy_server. ws:// (openpi) not supported here -- see module docstring
+num_episodes: 10
+instruction: ""
+mode: sync
+open_loop_horizon: 8
+replan_step: 0
+rtc: false
+policy_hz: null
+min_commit_steps: 0
+max_timesteps: 1000
+control_hz: 15.0
+num_envs: 1
+device: cuda:0
+capture_layers: []
