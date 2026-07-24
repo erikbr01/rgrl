@@ -1,0 +1,19 @@
+# Matches configs/data/lift_mh_state.yaml's shape_meta exactly (identical
+# to lift_state.yaml's -- lift-mh and lift-ph share the same obs/action
+# schema, just different demonstrator quality).
+obs:
+  object:
+    shape: [10]
+    type: low_dim
+  robot0_eef_pos:
+    shape: [3]
+    type: low_dim
+  robot0_eef_quat:
+    shape: [4]
+    type: low_dim
+    quat_convention: xyzw
+  robot0_gripper_qpos:
+    shape: [2]
+    type: low_dim
+action:
+  shape: [7]

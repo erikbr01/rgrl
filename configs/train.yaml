@@ -1,8 +1,9 @@
 defaults:
   - data: lift_state
   - target: lift_state
-  - policy: diffusion
+  - policy: flow
   - training: default
+  - sampling: uniform
   - override hydra/job_logging: none
   - override hydra/hydra_logging: none
   - _self_
@@ -22,3 +23,9 @@ hydra:
     dir: .
 
 out: runs/dev
+
+# Processes used to fit normalizer stats on a cache miss (one-time conversion).
+# The single source for this knob. Deliberately top-level, not under `data`:
+# it's an orchestration knob, so it must not enter the conversion cache hash.
+# null -> one process per key, capped at the CPU count.
+stats_workers: null

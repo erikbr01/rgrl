@@ -4,6 +4,7 @@ defaults:
   - _self_
 
 steps: 300
+warmup_steps: 50
 log_every: 100
 val_every: 100000
 save_every: 100000

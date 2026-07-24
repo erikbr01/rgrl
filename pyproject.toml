@@ -15,13 +15,19 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "ruff>=0.12",
+]
 wandb = ["wandb>=0.17"]
 eval = [
-    "robomimic==0.3.0",
     "robosuite==1.4.1",
     # robosuite 1.4.1's OSC controller breaks against mujoco >= 3 (mj_fullM
     # signature change); 2.3.7 is the newest compatible release
     "mujoco==2.3.7",
+    # Used to select an EGL device for headless image rollouts. The runtime
+    # talks directly to Robosuite and declares this dependency explicitly.
+    "egl-probe==1.0.2",
     "imageio[ffmpeg]>=2.34",
     # policy-server client: rgrl/inference/policy_client.py's HttpPolicy.
     # Deliberately not torch/fastapi — an env-only box never needs the
@@ -29,7 +35,7 @@ eval = [
     "requests>=2.31",
 ]
 # For the policy-serving box (rgrl/inference/policy_server.py) — never needed
-# on an env-only box (robomimic/robosuite/mujoco, or a real robot), which is
+# on an env-only box (robosuite/mujoco, or a real robot), which is
 # the whole point of the HTTP split.
 serve = [
     "fastapi>=0.110",
@@ -46,13 +52,22 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["rgrl"]
 
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+# Start with correctness checks that can be enforced on the existing research
+# codebase without a repository-wide formatting rewrite.
+select = ["E9", "F63", "F7", "F82"]
+
 [tool.uv]
 # robosuite 1.4.1 (needed for robomimic v0.3-era datasets) has old metadata.
 # Keep the core env resolvable without the eval extra.
 
-# cu128 wheels: this machine has an RTX 5090 (Blackwell, sm_120), which cu126
-# doesn't ship kernels for. cu128 is the oldest CUDA 12.x index with Blackwell
-# support and runs fine under this machine's 580 driver.
+# Keep the CUDA wheel source explicit so local training and CI resolve the
+# same Torch build family. The current benchmark host is an RTX 4090; cu128
+# wheels remain backward-compatible with it.
 [tool.uv.sources]
 torch = [{ index = "pytorch-cu128" }]
 torchvision = [{ index = "pytorch-cu128" }]

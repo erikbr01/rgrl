@@ -2,31 +2,14 @@ name: set_table_baseline
 # Rebuilt store (all three cameras, incl. wrist_image_right -- right-eye
 # decode of the wrist ZED via robo_dataset's `SERIAL:right` camera spec),
 # task-filtered + idle-trimmed by policy_graphs' trim_droid_idle_beginnings.py.
-# episode_ids: the baseline 60 "prepare plate - milk right" + 60 "prepare
-# plate - milk middle" indices from policy_graphs'
-# generate_set_table_episode_selection.py (--seed 42), success=True only
-# (cross-checked against each episode's raw trajectory.h5 `success` attr;
-# 2 of the original seed-42 draw were failed demos and got swapped for
-# replacements from the same task's remaining successful pool), merged and
-# sorted into a flat list (rgrl.data._convert_episode_subset takes a flat
-# list, not a per-task dict -- see configs/data/prepare_tray_baseline.yaml).
-# See configs/data/set_table_plusleft.yaml/plusright/plusmiddle for the 3
-# follow-up splits, each a strict superset of this list.
-store_path: /mnt/ssdB/erik/droid_converted_v2_trimmed
+# The selection manifest owns the seed-42 60-right + 60-middle baseline,
+# success replacements, and provenance. It resolves to a zero-copy logical
+# EpisodeView over this three-camera physical store.
+store_path: ${oc.env:RGRL_DATA_ROOT,/mnt/ssdB/erik}/droid_converted_v2_trimmed
+dataset_id: droid_v2_trimmed
 abs_action: false
 rename: {}
-episode_ids:
-  [
-    579, 582, 590, 591, 592, 593, 594, 595, 599, 602, 604, 605, 606, 608,
-    613, 623, 624, 626, 628, 631, 637, 639, 643, 650, 652, 653, 664, 669,
-    671, 672, 673, 675, 680, 683, 687, 688, 691, 694, 697, 698, 700, 702,
-    704, 707, 714, 718, 719, 723, 725, 726, 730, 733, 734, 737, 746, 751,
-    760, 761, 763, 765, 766, 767, 770, 776, 778, 779, 780, 783, 791, 793,
-    795, 800, 804, 806, 808, 810, 812, 813, 816, 819, 826, 828, 832, 833,
-    834, 836, 838, 840, 844, 848, 854, 855, 861, 863, 870, 878, 879, 1107,
-    1110, 1117, 1118, 1119, 1121, 1122, 1123, 1129, 1132, 1133, 1135, 1136,
-    1137, 1138, 1139, 1142, 1143, 1144, 1145, 1148, 1151, 1153,
-  ]
+selection_path: configs/selections/set_table_baseline.json
 shape_meta:
   obs:
     wrist_image_left:

@@ -1,6 +1,5 @@
-_target_: rgrl.eval_robomimic.InferenceConfig
-sampler: null
-inference_steps: null
-compile: true  # torch.compile the UNet; on by default, inference latency matters
-bf16: false
-use_ema: true
+defaults:
+  - default
+  - _self_
+
+# Backward-compatible alias for flow-specific CLI compositions.

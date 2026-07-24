@@ -1,5 +1,5 @@
 name: lift_ph_image
-path: /home/erbauer/diffusion_policy/data/robomimic/datasets/lift/ph/image.hdf5
+path: ${oc.env:RGRL_HOME_DATA_ROOT,/home/erbauer}/diffusion_policy/data/robomimic/datasets/lift/ph/image.hdf5
 abs_action: false
 rename: {}
 shape_meta:

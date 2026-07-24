@@ -1,10 +1,45 @@
+# Python
 __pycache__/
-*.pyc
-.venv/
-/runs/
-/data/
-/wandb/
-/outputs/
-*.log
+*.py[cod]
+*.so
 *.egg-info/
+dist/
+build/
+
+# Environments and local secrets
+.venv/
+venv/
+.env
+.env.*
+
+# Tests, lint, and coverage
 .pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Hydra / experiment output. No trailing slash on data and runs: this also
+# ignores the local symlinks commonly used to place large artifacts on SSD.
+/data
+/runs
+/wandb
+/outputs
+/multirun
+/.hydra
+*.log
+
+# Model/data artifacts outside the ignored experiment directories
+*.ckpt
+*.pt
+*.pth
+*.hdf5
+*.h5
+*.zarr/
+
+# Editors and OS files
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db

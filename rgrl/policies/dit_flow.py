@@ -18,7 +18,6 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 import torch
-import torch.nn.functional as F
 from robo_dataset.normalization import KeyNormalizer
 from torch import nn
 
@@ -41,6 +40,7 @@ class DiTFlowConfig:
     num_heads: int = 8
     mlp_ratio: float = 4.0
     num_kp: int = 32
+    share_image_encoder: bool = False
     # See DiffusionConfig.data_transforms -- same scheme.
     data_transforms: list[Callable] = field(default_factory=default_transforms)
     inference_steps: int = 10
@@ -61,7 +61,13 @@ class DiTFlowPolicy(nn.Module):
         self.cfg = DiTFlowConfig(**kwargs)
         cfg = self.cfg
         self.data_transforms_pipeline, target_hw = data_transforms_pipeline(store, cfg.data_transforms)
-        self.enc = ObsEncoder(store, cfg.obs_horizon, target_hw, num_kp=cfg.num_kp)
+        self.enc = ObsEncoder(
+            store,
+            cfg.obs_horizon,
+            target_hw,
+            num_kp=cfg.num_kp,
+            share_image_encoder=cfg.share_image_encoder,
+        )
         self.act_dim = store.meta.keys["action"].shape[0]
         self.action_norm = Normalizer(KeyNormalizer.from_dict(store.stats["action"]))
         self.obs_proj = nn.Linear(self.enc.out_dim, cfg.hidden_size)
@@ -83,7 +89,23 @@ class DiTFlowPolicy(nn.Module):
         obs = obs_vec.unsqueeze(1).expand(-1, t_vec.shape[1], -1) if t_vec.ndim == 3 else obs_vec
         return self.cond_proj(torch.cat([obs, t_vec], dim=-1))
 
+    def loss(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
+        """Training entry point over a raw dataset batch."""
+        return self.compute_loss(apply_pipeline(self.data_transforms_pipeline, batch))
+
+    def loss_terms(self, batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
+        """(squared-error sum, valid-element count) over a raw batch. Lets a
+        validation pass pool a true element-weighted mean across batches rather
+        than averaging per-batch means -- the latter mis-weights both the
+        variable prefix denominator and the short final batch."""
+        return self._loss_sum_weight(apply_pipeline(self.data_transforms_pipeline, batch))
+
     def compute_loss(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
+        """Backward-compatible mean loss over an already-preprocessed batch."""
+        total, weight = self._loss_sum_weight(batch)
+        return total / weight
+
+    def _loss_sum_weight(self, batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
         cfg = self.cfg
         obs_vec = self.obs_proj(self.enc(batch))
         actions = self.action_norm(batch["action"])
@@ -113,8 +135,10 @@ class DiTFlowPolicy(nn.Module):
         u = noise - actions  # velocity toward noise; integrate t: 1 -> 0
         if prefix_mask is not None:
             postfix = ~prefix_mask
-            return ((u - v) ** 2 * postfix).sum() / (postfix.sum() * self.act_dim + 1e-8)
-        return F.mse_loss(v, u)
+            err = (u - v) ** 2 * postfix
+            return err.sum(), postfix.sum() * self.act_dim + 1e-8
+        err = (v - u) ** 2
+        return err.sum(), err.numel()
 
     @torch.no_grad()
     def predict_action(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:

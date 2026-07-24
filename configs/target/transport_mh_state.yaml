@@ -1,0 +1,30 @@
+# Matches configs/data/transport_mh_*.yaml's shape_meta exactly today (no
+# conversion needed — the salvage stores already carry this exact schema,
+# action already abs-rot6d) -- see rgrl/conversion.py for what happens when
+# it doesn't.
+obs:
+  object:
+    shape: [41]
+    type: low_dim
+  robot0_eef_pos:
+    shape: [3]
+    type: low_dim
+  robot0_eef_quat:
+    shape: [4]
+    type: low_dim
+    quat_convention: xyzw
+  robot0_gripper_qpos:
+    shape: [2]
+    type: low_dim
+  robot1_eef_pos:
+    shape: [3]
+    type: low_dim
+  robot1_eef_quat:
+    shape: [4]
+    type: low_dim
+    quat_convention: xyzw
+  robot1_gripper_qpos:
+    shape: [2]
+    type: low_dim
+action:
+  shape: [20]

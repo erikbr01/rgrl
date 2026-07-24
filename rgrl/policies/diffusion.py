@@ -9,7 +9,6 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 import torch
-import torch.nn.functional as F
 from robo_dataset.normalization import KeyNormalizer
 from torch import nn
 
@@ -32,6 +31,7 @@ class DiffusionConfig:
     n_action_steps: int = 8
     down_dims: tuple[int, ...] = (256, 512, 1024)
     num_kp: int = 32
+    share_image_encoder: bool = False
     # Image transforms, applied in order -- see ObsEncoder's docstring
     # (rgrl/policies/base.py) and rgrl/transforms.py. Each entry is a
     # factory taking `image_keys` (a `_partial_: true` hydra target in
@@ -71,7 +71,13 @@ class DiffusionPolicy(nn.Module):
         self.cfg = DiffusionConfig(**kwargs)
         cfg = self.cfg
         self.data_transforms_pipeline, target_hw = data_transforms_pipeline(store, cfg.data_transforms)
-        self.enc = ObsEncoder(store, cfg.obs_horizon, target_hw, num_kp=cfg.num_kp)
+        self.enc = ObsEncoder(
+            store,
+            cfg.obs_horizon,
+            target_hw,
+            num_kp=cfg.num_kp,
+            share_image_encoder=cfg.share_image_encoder,
+        )
         self.act_dim = store.meta.keys["action"].shape[0]
         self.action_norm = Normalizer(KeyNormalizer.from_dict(store.stats["action"]))
         # +1 input channel when trained for RTC: the prefix mask. out_dim
@@ -113,7 +119,23 @@ class DiffusionPolicy(nn.Module):
         mask = (pos >= start) & (pos < start + delay[:, None])
         return mask[:, :, None]
 
+    def loss(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
+        """Training entry point over a raw dataset batch."""
+        return self.compute_loss(apply_pipeline(self.data_transforms_pipeline, batch))
+
+    def loss_terms(self, batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
+        """(squared-error sum, valid-element count) over a raw batch. Lets a
+        validation pass pool a true element-weighted mean across batches rather
+        than averaging per-batch means -- the latter mis-weights both the
+        variable prefix denominator and the short final batch."""
+        return self._loss_sum_weight(apply_pipeline(self.data_transforms_pipeline, batch))
+
     def compute_loss(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
+        """Backward-compatible mean loss over an already-preprocessed batch."""
+        total, weight = self._loss_sum_weight(batch)
+        return total / weight
+
+    def _loss_sum_weight(self, batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
         cfg = self.cfg
         cond = self.enc(batch)
         actions = self.action_norm(batch["action"])
@@ -126,7 +148,8 @@ class DiffusionPolicy(nn.Module):
             pred = self.unet(noisy, t, cond)
             # no pad masking: padded actions are edge-replicated, matching the
             # reference implementation's training objective
-            return F.mse_loss(pred, noise)
+            err = (pred - noise) ** 2
+            return err.sum(), err.numel()
 
         # Train-time RTC: clean (jittered) actions substituted at the prefix,
         # flagged by the mask channel; epsilon loss only where there is
@@ -138,7 +161,8 @@ class DiffusionPolicy(nn.Module):
         noisy = torch.where(prefix_mask, clean, noisy)
         pred = self.unet(torch.cat([noisy, prefix_mask.to(noisy.dtype)], dim=-1), t, cond)
         postfix = ~prefix_mask
-        return ((pred - noise) ** 2 * postfix).sum() / (postfix.sum() * self.act_dim + 1e-8)
+        err = (pred - noise) ** 2 * postfix
+        return err.sum(), postfix.sum() * self.act_dim + 1e-8
 
     def _sample(self, x: torch.Tensor, cond: torch.Tensor, prefix: torch.Tensor | None, start: int) -> torch.Tensor:
         """The shared denoising loop. If `prefix` is given ((B, P, act_dim),

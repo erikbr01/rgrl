@@ -7,7 +7,6 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 import torch
-import torch.nn.functional as F
 from robo_dataset.normalization import KeyNormalizer
 from torch import nn
 
@@ -29,6 +28,7 @@ class FlowConfig:
     n_action_steps: int = 8
     down_dims: tuple[int, ...] = (256, 512, 1024)
     num_kp: int = 32
+    share_image_encoder: bool = False
     # See DiffusionConfig.data_transforms -- same scheme.
     data_transforms: list[Callable] = field(default_factory=default_transforms)
     inference_steps: int = 10
@@ -48,7 +48,13 @@ class FlowPolicy(nn.Module):
         self.cfg = FlowConfig(**kwargs)
         cfg = self.cfg
         self.data_transforms_pipeline, target_hw = data_transforms_pipeline(store, cfg.data_transforms)
-        self.enc = ObsEncoder(store, cfg.obs_horizon, target_hw, num_kp=cfg.num_kp)
+        self.enc = ObsEncoder(
+            store,
+            cfg.obs_horizon,
+            target_hw,
+            num_kp=cfg.num_kp,
+            share_image_encoder=cfg.share_image_encoder,
+        )
         self.act_dim = store.meta.keys["action"].shape[0]
         self.action_norm = Normalizer(KeyNormalizer.from_dict(store.stats["action"]))
         # +1 input channel when trained for RTC (the prefix mask), exactly as
@@ -57,6 +63,8 @@ class FlowPolicy(nn.Module):
         self.unet = ConditionalUnet1D(
             in_dim, global_cond_dim=self.enc.out_dim, down_dims=cfg.down_dims, out_dim=self.act_dim
         )
+        if cfg.inference_steps <= 0:
+            raise ValueError(f"inference_steps must be positive, got {cfg.inference_steps}")
 
     def _sample_prefix_mask(self, b: int, device: torch.device) -> torch.Tensor:
         """(B, horizon, 1) bool prefix mask — see DiffusionPolicy's twin."""
@@ -69,7 +77,23 @@ class FlowPolicy(nn.Module):
         mask = (pos >= start) & (pos < start + delay[:, None])
         return mask[:, :, None]
 
+    def loss(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
+        """Training entry point over a raw dataset batch."""
+        return self.compute_loss(apply_pipeline(self.data_transforms_pipeline, batch))
+
+    def loss_terms(self, batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
+        """(squared-error sum, valid-element count) over a raw batch. Lets a
+        validation pass pool a true element-weighted mean across batches rather
+        than averaging per-batch means -- the latter mis-weights both the
+        variable prefix denominator and the short final batch."""
+        return self._loss_sum_weight(apply_pipeline(self.data_transforms_pipeline, batch))
+
     def compute_loss(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
+        """Backward-compatible mean loss over an already-preprocessed batch."""
+        total, weight = self._loss_sum_weight(batch)
+        return total / weight
+
+    def _loss_sum_weight(self, batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
         cfg = self.cfg
         cond = self.enc(batch)
         actions = self.action_norm(batch["action"])
@@ -80,7 +104,8 @@ class FlowPolicy(nn.Module):
         target = noise - actions  # velocity toward noise; integrate t: 1 -> 0
         if cfg.max_action_prefix == 0:
             pred = self.unet(x_t, t * cfg.timestep_scale, cond)
-            return F.mse_loss(pred, target)
+            err = (pred - target) ** 2
+            return err.sum(), err.numel()
 
         # Train-time RTC: prefix positions sit at their t=0 point on the flow
         # path (the clean actions, optionally jittered), flagged by the mask
@@ -92,7 +117,8 @@ class FlowPolicy(nn.Module):
         x_t = torch.where(prefix_mask, clean, x_t)
         pred = self.unet(torch.cat([x_t, prefix_mask.to(x_t.dtype)], dim=-1), t * cfg.timestep_scale, cond)
         postfix = ~prefix_mask
-        return ((pred - target) ** 2 * postfix).sum() / (postfix.sum() * self.act_dim + 1e-8)
+        err = (pred - target) ** 2 * postfix
+        return err.sum(), postfix.sum() * self.act_dim + 1e-8
 
     def _integrate(self, x: torch.Tensor, cond: torch.Tensor, prefix: torch.Tensor | None, start: int) -> torch.Tensor:
         """Shared Euler integration t: 1 -> 0. If `prefix` is given ((B, P,

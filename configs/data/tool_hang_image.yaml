@@ -1,0 +1,29 @@
+name: tool_hang_ph_image
+# Robomimic does not host the image variant. Generate it from the raw PH
+# demonstrations with sideview + robot0_eye_in_hand at 84x84, or override
+# data.path for a differently located equivalent file.
+path: data/robomimic/tool_hang/ph/image_84.hdf5
+abs_action: false
+rename: {}
+shape_meta:
+  obs:
+    sideview_image:
+      shape: [84, 84, 3]
+      type: rgb
+      channel_order: rgb
+    robot0_eye_in_hand_image:
+      shape: [84, 84, 3]
+      type: rgb
+      channel_order: rgb
+    robot0_eef_pos:
+      shape: [3]
+      type: low_dim
+    robot0_eef_quat:
+      shape: [4]
+      type: low_dim
+      quat_convention: xyzw
+    robot0_gripper_qpos:
+      shape: [2]
+      type: low_dim
+  action:
+    shape: [7]

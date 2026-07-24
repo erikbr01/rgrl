@@ -20,7 +20,8 @@ silently mismatching the policy's encoder.
 from __future__ import annotations
 
 import json
-from concurrent.futures import ThreadPoolExecutor
+import os
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -37,6 +38,7 @@ _QUAT_CONVENTIONS = {"xyzw", "wxyz"}
 
 _RGRL_META_FILE = "rgrl_meta.json"
 _STATS_FILE = "stats.json"
+EPISODE_VIEW_FILE = "episode_view.json"
 
 
 @dataclass
@@ -92,6 +94,14 @@ class EpisodeStore:
     def __init__(self, path: str | Path, shape_meta: dict):
         self.path = Path(path)
         self._robo = open_store(str(self.path))
+        view_path = self.path / EPISODE_VIEW_FILE
+        self.episode_ids: tuple[int, ...] | None = None
+        if view_path.exists():
+            from robo_dataset.views import EpisodeView
+
+            view_doc = json.loads(view_path.read_text())
+            self.episode_ids = tuple(view_doc["episode_ids"])
+            self._robo = EpisodeView(self._robo, self.episode_ids)
 
         keys = {}
         for k, spec in shape_meta["obs"].items():
@@ -202,13 +212,25 @@ class EpisodeStore:
         )
 
 
+def _fit_key_stats(key: str, arr: np.ndarray, norm_method: str) -> tuple[str, dict]:
+    """Fit one key's normalizer and serialize it. Module-level (not a closure)
+    so ProcessPoolExecutor can pickle it to a worker process."""
+    from robo_dataset.normalization import fit_key
+
+    arr = np.asarray(arr)
+    return key, fit_key(arr.reshape(len(arr), -1), norm_method).to_dict()
+
+
 def write_sidecars(
     store_path: str | Path,
-    stats_keys: dict[str, np.ndarray],  # key -> (N, *shape) array, action/state only
+    # key -> (N, *shape) array, or a list of per-episode chunks to concatenate
+    # here (action/state only).
+    stats_keys: dict[str, np.ndarray | list[np.ndarray]],
     env_meta: dict | None = None,
     source: str = "",
     fps: float | None = None,
     norm_method: str = "minmax",
+    num_workers: int | None = None,
 ) -> None:
     """Call after the robo_dataset writer's finalize() to add rgrl's sidecars.
 
@@ -218,12 +240,49 @@ def write_sidecars(
 
     Kind classification (image vs. low_dim) is not stored here — it's
     declared by the caller's shape_meta config, not a fact about the store.
+
+    ``norm_method`` picks the fit (robo_dataset.normalization.KNOWN_METHODS):
+    ``minmax`` (min/max), ``zscore`` (mean/std), ``minmax_p99`` (1st/99th
+    percentile), plus ``max_abs``/``none``/``fixed_range``.
+
+    ``stats_keys`` values may be a full array or a list of per-episode chunks;
+    chunks are concatenated here and each key is dropped from the mapping once
+    fit, so the caller never has to hold a second concatenated copy of every
+    key at once (this consumes the passed mapping). Fitting is exact regardless
+    of chunking or worker count. Per-key fits are independent, so they run
+    across up to ``num_workers`` separate processes (default: one per key,
+    capped at the CPU count) for true parallelism past the GIL. More workers
+    hold more keys' arrays at once; num_workers=1 minimizes peak memory.
     """
-    from robo_dataset.normalization import fit_key
+    from robo_dataset.normalization import KNOWN_METHODS
+
+    if norm_method not in KNOWN_METHODS:
+        raise ValueError(f"norm_method must be one of {KNOWN_METHODS}, got {norm_method!r}")
 
     path = Path(store_path)
     (path / _RGRL_META_FILE).write_text(
         json.dumps({"env_meta": env_meta or {}, "source": source, "fps": fps}, indent=1)
     )
-    stats = {k: fit_key(v.reshape(len(v), -1), norm_method).to_dict() for k, v in stats_keys.items()}
+
+    keys = list(stats_keys)
+
+    def materialize(key: str) -> np.ndarray:
+        chunks = stats_keys.pop(key)  # drop the caller's reference so it can free
+        return np.concatenate(chunks, axis=0) if isinstance(chunks, list) else np.asarray(chunks)
+
+    if num_workers is None:
+        num_workers = min(len(keys), os.cpu_count() or 1)
+    num_workers = max(1, num_workers)
+
+    if num_workers == 1 or len(keys) <= 1:
+        stats = {k: _fit_key_stats(k, materialize(k), norm_method)[1] for k in keys}
+    else:
+        # Processes, not threads: the per-key fit is largely NumPy C work but we
+        # want real parallelism regardless of GIL behavior. Arrays are pickled to
+        # workers (cheap for low-dim keys); each returns a small serialized stat.
+        with ProcessPoolExecutor(max_workers=num_workers) as pool:
+            futures = {pool.submit(_fit_key_stats, k, materialize(k), norm_method): k for k in keys}
+            done = dict(f.result() for f in futures)
+        stats = {k: done[k] for k in keys}  # restore deterministic key order
+
     (path / _STATS_FILE).write_text(json.dumps(stats, indent=1))

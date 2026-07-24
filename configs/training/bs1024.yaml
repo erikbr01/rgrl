@@ -1,0 +1,20 @@
+# Big-batch recipe: 4x fatter kernels lift SM occupancy (the train loop's
+# actual utilization limiter -- see rgrl/train_loop.py's module docstring),
+# measured 1.81x higher steady-state sample throughput on ToolHang flow
+# (42.3k versus 23.4k samples/s) with equal-or-better historical
+# quality (tool_hang sync: 0.94 vs 0.86 at the bs=256 baseline; linear lr
+# scaling edged out sqrt, 0.94 vs 0.92). Steps are 1/4 of the bs=256 default
+# so the model sees the same amount of data (7500 * 1024 == 30000 * 256).
+# Validated on lowdim; check memory headroom before using with image
+# observations.
+defaults:
+  - default
+  - _self_
+
+batch_size: 1024
+lr: 4.0e-4
+steps: 7500
+warmup_steps: 125
+log_every: 25
+val_every: 500
+save_every: 2500

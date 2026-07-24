@@ -1,0 +1,6 @@
+defaults:
+  - transport_mh_base
+  - _self_
+
+name: transport_mh_salvaged_lowdim
+store_path: ${oc.env:RGRL_DATA_ROOT,/mnt/ssdB/erik}/policy_graphs/data/salvage/transport_mh_250/robomimic/transport/mh/salvaged

@@ -1,4 +1,5 @@
 _target_: rgrl.train_loop.TrainConfig
+# Length and all cadences are in optimizer steps (gradient updates).
 steps: 30000
 batch_size: 256
 lr: 1.0e-4
@@ -6,12 +7,17 @@ weight_decay: 1.0e-6
 betas: [0.95, 0.999]
 warmup_steps: 500
 seed: 0
+val_seed: 17029
 val_episodes: 4
 val_every: 2000
 log_every: 100
 save_every: 10000
+resume: auto
+resume_allow_legacy: false
 pin_fallback_gb: 20.0
 dataloader_workers: 0
+data_mode: auto
+device_memory_reserve_gb: 4.0
 compile: true
 bf16: true
 ema_power: 0.75

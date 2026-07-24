@@ -15,12 +15,13 @@ checkpoints are self-contained -- no separate normalizer artifact.
 
 ObsEncoder does not resize, crop, or otherwise transform images -- that's
 each policy's job (DiffusionPolicy/FlowPolicy/DiTFlowPolicy), applying its
-own `self.data_transforms_pipeline` (built by rgrl.transforms.data_transforms_pipeline) at
-the two places raw obs enters it: once per training step (the train loop,
-before compute_loss) and at the top of predict_action / predict_action_rtc.
-ObsEncoder only needs to know the resulting size (`target_hw`, passed in)
-to size its vision backbone -- it turns an already-preprocessed obs window
-into a flat conditioning vector, nothing else.
+own `self.data_transforms_pipeline` (built by
+rgrl.transforms.data_transforms_pipeline) at the policy boundary:
+`loss(raw_batch)` for training and at the top of predict_action /
+predict_action_rtc for inference. ObsEncoder only needs to know the
+resulting size (`target_hw`, passed in) to size its vision backbone -- it
+turns an already-preprocessed obs window into a flat conditioning vector,
+nothing else.
 """
 
 from __future__ import annotations
@@ -45,11 +46,25 @@ class ObsEncoder(nn.Module):
         obs_horizon: int,
         target_hw: tuple[int, int] | None = None,
         num_kp: int = 32,
+        share_image_encoder: bool = False,
     ):
         super().__init__()
         self.obs_horizon = obs_horizon
+        self.share_image_encoder = share_image_encoder
         self.image_keys = sorted(k for k, s in store.meta.keys.items() if s.kind == "image")
         self.state_keys = sorted(k for k, s in store.meta.keys.items() if s.kind == "state")
+        all_keys = self.state_keys + self.image_keys
+        module_keys = [key.replace(".", "_") for key in all_keys]
+        if len(module_keys) != len(set(module_keys)):
+            collisions = {
+                module_key: [key for key in all_keys if key.replace(".", "_") == module_key]
+                for module_key in sorted(set(module_keys))
+                if module_keys.count(module_key) > 1
+            }
+            raise ValueError(
+                f"observation keys collide after checkpoint-compatible module "
+                f"name encoding: {collisions}"
+            )
 
         self.state_norms = nn.ModuleDict()
         state_dim = 0
@@ -60,10 +75,15 @@ class ObsEncoder(nn.Module):
 
         self.encoders = nn.ModuleDict()
         feat_dim = 0
-        for k in self.image_keys:
-            enc = ResNet18Encoder(target_hw, num_kp=num_kp)
-            self.encoders[k.replace(".", "_")] = enc
-            feat_dim += enc.out_dim
+        if self.image_keys and share_image_encoder:
+            self.shared_encoder = ResNet18Encoder(target_hw, num_kp=num_kp)
+            feat_dim = len(self.image_keys) * self.shared_encoder.out_dim
+        else:
+            self.shared_encoder = None
+            for k in self.image_keys:
+                enc = ResNet18Encoder(target_hw, num_kp=num_kp)
+                self.encoders[k.replace(".", "_")] = enc
+                feat_dim += enc.out_dim
 
         self.out_dim = (state_dim + feat_dim) * obs_horizon
 
@@ -73,8 +93,23 @@ class ObsEncoder(nn.Module):
         for k in self.state_keys:
             x = batch[k].reshape(b, self.obs_horizon, -1)
             feats.append(self.state_norms[k.replace(".", "_")](x))
-        for k in self.image_keys:
-            x = batch[k].reshape(b * self.obs_horizon, *batch[k].shape[2:])
-            f = self.encoders[k.replace(".", "_")](x)
-            feats.append(f.reshape(b, self.obs_horizon, -1))
+        if self.shared_encoder is not None:
+            camera_batch = torch.cat(
+                [
+                    batch[k].reshape(
+                        b * self.obs_horizon,
+                        *batch[k].shape[2:],
+                    )
+                    for k in self.image_keys
+                ],
+                dim=0,
+            )
+            encoded = self.shared_encoder(camera_batch)
+            for camera_features in encoded.chunk(len(self.image_keys), dim=0):
+                feats.append(camera_features.reshape(b, self.obs_horizon, -1))
+        else:
+            for k in self.image_keys:
+                x = batch[k].reshape(b * self.obs_horizon, *batch[k].shape[2:])
+                f = self.encoders[k.replace(".", "_")](x)
+                feats.append(f.reshape(b, self.obs_horizon, -1))
         return torch.cat(feats, dim=-1).flatten(1)

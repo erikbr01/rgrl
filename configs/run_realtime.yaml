@@ -1,5 +1,5 @@
 defaults:
-  - inference: diffusion
+  - inference: default
   - rollout_env: robomimic
   - override hydra/job_logging: none
   - override hydra/hydra_logging: none

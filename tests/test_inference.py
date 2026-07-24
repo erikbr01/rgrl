@@ -8,6 +8,7 @@ import torch
 from torch import nn
 
 from rgrl.inference.activations import ActivationCapture
+from rgrl.inference.envs.robomimic import _env_kwargs, _frame, _task_success
 from rgrl.inference.obs_window import RollingObsWindow
 from rgrl.inference.policy_client import HttpPolicy, LocalPolicy, PolicyBase, WebSocketPolicy
 from rgrl.inference.rollout_cli import build_policy
@@ -25,6 +26,69 @@ def test_wire_roundtrip():
     for k in arrays:
         np.testing.assert_array_equal(decoded[k], arrays[k])
         assert decoded[k].dtype == arrays[k].dtype
+
+
+def test_robosuite_frame_uses_dataset_key_names_and_camera_orientation():
+    image = np.arange(2 * 3 * 3, dtype=np.uint8).reshape(2, 3, 3)
+    raw = {
+        "object-state": np.array([1.0, 2.0], dtype=np.float64),
+        "robot0_eef_pos": np.array([3.0, 4.0, 5.0], dtype=np.float64),
+        "sideview_image": image,
+    }
+    frame = _frame(
+        raw,
+        image_keys=["sideview_image"],
+        state_keys=["object", "robot0_eef_pos"],
+    )
+
+    np.testing.assert_array_equal(frame["object"], [1.0, 2.0])
+    np.testing.assert_array_equal(frame["robot0_eef_pos"], [3.0, 4.0, 5.0])
+    np.testing.assert_array_equal(frame["sideview_image"], image[::-1])
+    assert frame["object"].dtype == np.float32
+    assert frame["sideview_image"].dtype == np.uint8
+    assert frame["sideview_image"].flags.c_contiguous
+
+
+def test_robosuite_kwargs_are_host_local_and_do_not_mutate_metadata(monkeypatch):
+    class EglProbe:
+        @staticmethod
+        def get_available_devices():
+            return [3]
+
+    monkeypatch.setitem(__import__("sys").modules, "egl_probe", EglProbe)
+    env_meta = {
+        "type": 1,
+        "env_kwargs": {
+            "render_gpu_device_id": 7,
+            "controller_configs": {"control_delta": True},
+        },
+    }
+    kwargs = _env_kwargs(
+        env_meta,
+        image_keys=["sideview_image"],
+        image_hw=(84, 96),
+        abs_action=True,
+    )
+
+    assert kwargs["render_gpu_device_id"] == 3
+    assert kwargs["camera_names"] == ["sideview"]
+    assert kwargs["camera_heights"] == 84
+    assert kwargs["camera_widths"] == 96
+    assert kwargs["controller_configs"]["control_delta"] is False
+    assert env_meta["env_kwargs"]["render_gpu_device_id"] == 7
+    assert env_meta["env_kwargs"]["controller_configs"]["control_delta"] is True
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [(True, True), (False, False), ({"task": True, "stage": False}, True)],
+)
+def test_robosuite_task_success_accepts_native_result_shapes(value, expected):
+    class Env:
+        def _check_success(self):
+            return value
+
+    assert _task_success(Env()) is expected
 
 
 def test_rolling_obs_window_front_fills_and_stacks():
@@ -390,3 +454,54 @@ def test_build_policy_ckpt_given_returns_local_policy(monkeypatch):
     assert isinstance(policy, LocalPolicy)
     assert str(captured["ckpt_path"]) == "runs/x/latest.pt"
     assert captured["device"] == torch.device("cpu")
+
+
+def _rodrigues(rotvec):
+    theta = float(np.linalg.norm(rotvec))
+    if theta < 1e-12:
+        return np.eye(3)
+    k = np.asarray(rotvec) / theta
+    K = np.array([[0, -k[2], k[1]], [k[2], 0, -k[0]], [-k[1], k[0], 0]])
+    return np.eye(3) + np.sin(theta) * K + (1 - np.cos(theta)) * (K @ K)
+
+
+def test_rotation_6d_to_axis_angle_round_trips_including_pi():
+    # The rot6d->axis-angle map must recover the rotation everywhere, including
+    # the theta~=pi log-map singularity where the antisymmetric part vanishes.
+    from rgrl.inference.action_transforms import rotation_6d_to_axis_angle
+
+    rng = np.random.default_rng(0)
+    axis = np.array([0.3, -0.7, 0.5])
+    axis = axis / np.linalg.norm(axis)
+    cases = [rng.normal(size=3) / np.linalg.norm(rng.normal(size=3)) * rng.uniform(0, np.pi) for _ in range(300)]
+    cases += [axis * np.pi, axis * (np.pi - 1e-9), -axis * np.pi, axis * 1e-10]
+    for rotvec in cases:
+        r = _rodrigues(rotvec)
+        rot6d = np.concatenate([r[0], r[1]])  # first two rows (the fn's convention)
+        recovered = rotation_6d_to_axis_angle(rot6d)
+        # compare as rotations (axis sign is genuinely ambiguous at exactly pi)
+        assert np.allclose(_rodrigues(recovered), r, atol=1e-4), (rotvec, recovered)
+
+
+def test_undo_abs_rotation_action_shapes_and_gripper_passthrough():
+    from rgrl.inference.action_transforms import undo_abs_rotation_action
+
+    # dual-arm: 20-dim (pos3+rot6d6+grip1 per arm) -> 14-dim (pos3+aa3+grip1)
+    action = np.zeros((5, 20))
+    action[..., 3:9] = np.tile(np.array([1.0, 0, 0, 0, 1.0, 0]), (5, 1))  # identity rot6d, arm 0
+    action[..., 13:19] = np.tile(np.array([1.0, 0, 0, 0, 1.0, 0]), (5, 1))  # arm 1
+    action[..., 2] = 0.7  # arm-0 z position
+    action[..., 9] = -1.0  # arm-0 gripper
+    out = undo_abs_rotation_action(action)
+    assert out.shape == (5, 14)
+    assert np.allclose(out[..., 3:6], 0.0, atol=1e-6)  # identity -> zero axis-angle
+    assert np.allclose(out[..., 2], 0.7)  # position preserved
+    assert np.allclose(out[..., 6], -1.0)  # gripper preserved
+
+
+def test_abs_action_env_kwargs_requires_controller_config():
+    from rgrl.inference.envs.robomimic import _env_kwargs
+
+    meta = {"env_name": "X", "env_kwargs": {}}  # no controller_configs
+    with pytest.raises(ValueError, match="controller_configs"):
+        _env_kwargs(meta, [], None, abs_action=True)
