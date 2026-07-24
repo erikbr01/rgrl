@@ -20,7 +20,7 @@ from rgrl.data import load_store
 
 @hydra.main(version_base=None, config_path="../configs", config_name="train")
 def main(cfg: DictConfig) -> None:
-    store = load_store(cfg.data, cfg.target)
+    store = load_store(cfg.data, cfg.target, stats_workers=cfg.get("stats_workers"))
     print(f"cached at {store.path} ({store.meta.num_episodes} episodes, {store.meta.num_frames} frames)")
 
 

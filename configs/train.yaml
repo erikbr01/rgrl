@@ -23,3 +23,9 @@ hydra:
     dir: .
 
 out: runs/dev
+
+# Processes used to fit normalizer stats on a cache miss (one-time conversion).
+# Deliberately top-level, not under `data`: it's an orchestration knob, so it
+# must not enter the conversion cache hash. null -> RGRL_STATS_WORKERS env, then
+# one process per key capped at the CPU count.
+stats_workers: null
