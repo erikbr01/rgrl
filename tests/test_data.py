@@ -240,7 +240,7 @@ def _write_generative_store(tmp_path):
     """A directory with just the tasks.json (+curation.json) a generative
     selection reads -- enough to unit-test resolution without a full store."""
     store = tmp_path / "gen_store"
-    store.mkdir()
+    store.mkdir(parents=True, exist_ok=True)
     # 6 'alpha' + 4 'beta' episodes, interleaved so a sorted pool != draw order.
     tasks = {str(e): ("alpha" if e % 5 < 3 else "beta") for e in range(10)}
     (store / "tasks.json").write_text(json.dumps(tasks))
@@ -319,6 +319,61 @@ def test_generative_selection_validation_errors(tmp_path):
         _resolve_selection({"seed": 1, "select": [{"task": "alpha", "count": 1}]}, None)
     with pytest.raises(ValueError, match="either episode_ids or seed/select"):
         _resolve_selection({"episode_ids": [0], "seed": 1, "select": []}, store)
+
+
+def test_first_n_is_stable_under_store_growth(tmp_path):
+    """method=first_n takes the first `count` episodes by id, so appending new
+    (higher-id) episodes to the store never changes the selection -- unlike the
+    seeded random draw, whose pool size changes."""
+    from rgrl.data import _resolve_selection
+
+    store = _write_generative_store(tmp_path)
+    sel = {"method": "first_n", "select": [{"task": "alpha", "count": 3}]}
+    before = _resolve_selection(sel, store)
+    assert before == [0, 1, 2]  # first three alpha ids
+
+    # Grow the store: two more 'alpha' episodes with higher ids.
+    tasks = json.loads((store / "tasks.json").read_text())
+    tasks["100"] = "alpha"
+    tasks["101"] = "alpha"
+    (store / "tasks.json").write_text(json.dumps(tasks))
+    assert _resolve_selection(sel, store) == before  # unchanged under growth
+
+    # Contrast: the seeded random draw is NOT stable across the same growth.
+    rnd = {"seed": 42, "select": [{"task": "alpha", "count": 3}]}
+    store2 = _write_generative_store(tmp_path / "b")
+    small = _resolve_selection(rnd, store2)
+    t = json.loads((store2 / "tasks.json").read_text())
+    t["100"] = "alpha"
+    t["101"] = "alpha"
+    (store2 / "tasks.json").write_text(json.dumps(t))
+    assert _resolve_selection(rnd, store2) != small
+
+
+def test_first_n_continuation_takes_the_next_n(tmp_path):
+    from rgrl.data import _resolve_selection
+
+    store = _write_generative_store(tmp_path)
+    ids = _resolve_selection(
+        {"method": "first_n", "select": [{"task": "alpha", "count": 3}, {"task": "alpha", "count": 2}]},
+        store,
+    )
+    # first 3 alpha = [0, 1, 2], next 2 = [5, 6]; disjoint, still first-by-id.
+    assert ids == [0, 1, 2, 5, 6]
+
+
+def test_selection_method_validation(tmp_path):
+    from rgrl.data import _resolve_selection
+
+    store = _write_generative_store(tmp_path)
+    with pytest.raises(ValueError, match="unknown selection method"):
+        _resolve_selection({"method": "nope", "seed": 1, "select": [{"task": "alpha", "count": 1}]}, store)
+    with pytest.raises(ValueError, match="method=random needs a 'seed'"):
+        _resolve_selection({"select": [{"task": "alpha", "count": 1}]}, store)
+    with pytest.raises(ValueError, match="takes no 'seed'"):
+        _resolve_selection(
+            {"method": "first_n", "seed": 1, "select": [{"task": "alpha", "count": 1}]}, store
+        )
 
 
 def test_selection_provenance_edits_do_not_change_resolved_ids(tmp_path):

@@ -518,10 +518,15 @@ selection:
   expected_sha256: "..."
 ```
 
-Semantics: rules are drawn in order, and **listing a task again continues the
-same seeded draw without replacement** — so a follow-up split is just the
-baseline rules plus one extra same-task rule, fully self-contained (no
-cross-file parent). The success curation (unsuccessful→successful episode swaps)
+Two draw methods: `random` (default, seeded uniform — reproducible for a fixed
+store but the subset changes when a task gains episodes) and `first_n` (the
+first `count` by id — **stable under store growth**, since new episodes append
+with higher ids past the first `count`; deterministic, so no seed). Fixed-count
+random selection is inherently not growth-stable — the pool size changes, so the
+seed lands elsewhere — which is why `first_n` exists for datasets meant to grow.
+Rules are drawn in order, and **listing a task again continues without
+replacement** — so a follow-up split is just the baseline rules plus one extra
+same-task rule, fully self-contained (no cross-file parent). The success curation (unsuccessful→successful episode swaps)
 is baked into the store's `curation.json`, validated to stay in-task. An
 explicit-`episode_ids` escape hatch remains for externally-curated sets with no
 regenerable rule (none of the current configs need it). `count` is a

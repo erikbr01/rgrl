@@ -132,6 +132,15 @@ def _seeded_continuation(episodes: list[int], used: set[int], count: int, seed: 
     return sorted(np.random.default_rng(seed).permutation(remaining)[:count].tolist())
 
 
+def _first_n(episodes: list[int], used: set[int], count: int) -> list[int]:
+    """First `count` episodes by ascending id, skipping any already drawn by a
+    prior same-task rule. Deterministic and *stable under store growth*: new
+    episodes are appended to the store with higher ids, so they land at the end
+    of the sorted pool and never displace the first `count`. `episodes` arrives
+    sorted from _store_task_episodes."""
+    return [e for e in episodes if e not in used][:count]
+
+
 def _apply_curation(draw: list[int], swaps: dict[int, int]) -> list[int]:
     """Substitute unsuccessful episodes present in this draw with their
     successful replacements."""
@@ -150,9 +159,18 @@ def _resolve_selection(selection: dict, store_path: Path | None, name: str = "se
     """Resolve an inline selection block (from a data config's `selection:` key)
     to its episode ids.
 
-    Generative form -- {seed, select: [{task, count}, ...]} -- draws `count`
-    episodes per rule from the store's tasks.json, seeded. Listing the same task
-    more than once continues the same seeded draw without replacement, so a
+    Generative form -- {method?, seed?, select: [{task, count}, ...]} -- draws
+    `count` episodes per rule from the store's tasks.json. Two methods:
+
+      method: random (default) -- seeded uniform draw (np.random.default_rng +
+        choice/replace=False). Reproducible for a fixed store but NOT stable
+        under store growth: adding episodes to a task changes the pool size, so
+        the same seed selects a different subset. Needs `seed`.
+      method: first_n -- the first `count` episodes by ascending id. Stable
+        under store growth (new episodes get higher ids and append past the
+        first `count`). Deterministic, so it takes no `seed`.
+
+    Listing the same task more than once continues without replacement, so a
     follow-up split is just the baseline rules plus one extra same-task rule (no
     cross-file parent needed). Success curation (store curation.json) is applied
     per draw. Explicit form -- {episode_ids: [...]} -- is the escape hatch for an
@@ -169,14 +187,21 @@ def _resolve_selection(selection: dict, store_path: Path | None, name: str = "se
         # source_cfg episode_ids subset semantics.
         episode_ids = list(dict.fromkeys(int(e) for e in selection["episode_ids"]))
     else:
-        if "select" not in selection or "seed" not in selection:
-            raise ValueError(f"{name}: generative selection needs both 'seed' and 'select'")
+        if "select" not in selection:
+            raise ValueError(f"{name}: generative selection needs a 'select' list")
+        method = selection.get("method", "random")
+        if method not in ("random", "first_n"):
+            raise ValueError(f"{name}: unknown selection method {method!r} (random | first_n)")
+        if method == "random" and "seed" not in selection:
+            raise ValueError(f"{name}: method=random needs a 'seed'")
+        if method == "first_n" and "seed" in selection:
+            raise ValueError(f"{name}: method=first_n is deterministic and takes no 'seed'")
         if store_path is None:
             raise ValueError(
                 f"{name}: generative selection needs the source store_path "
                 "(for tasks.json/curation.json) but none was provided"
             )
-        seed = int(selection["seed"])
+        seed = int(selection["seed"]) if method == "random" else 0
         task_episodes, curation = _load_store_meta(store_path, {})
         raw_used: dict[str, set[int]] = defaultdict(set)
         ids: list[int] = []
@@ -184,11 +209,14 @@ def _resolve_selection(selection: dict, store_path: Path | None, name: str = "se
             task, count = rule["task"], int(rule["count"])
             if task not in task_episodes:
                 raise ValueError(f"{name}: unknown task {task!r}")
-            # A repeated task continues the same seeded draw without replacement.
-            if raw_used[task]:
-                raw = _seeded_continuation(task_episodes[task], raw_used[task], count, seed)
+            pool = task_episodes[task]
+            # A repeated task continues without replacement (skips prior draws).
+            if method == "first_n":
+                raw = _first_n(pool, raw_used[task], count)
+            elif raw_used[task]:
+                raw = _seeded_continuation(pool, raw_used[task], count, seed)
             else:
-                raw = _seeded_choice(task_episodes[task], count, seed)
+                raw = _seeded_choice(pool, count, seed)
             raw_used[task] |= set(raw)
             ids += _apply_curation(raw, curation.get(task, {}))
         episode_ids = sorted(set(ids))
