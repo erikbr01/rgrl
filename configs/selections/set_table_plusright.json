@@ -13,5 +13,6 @@
       "count": 60
     }
   ],
-  "count": 180
+  "count": 180,
+  "expected_sha256": "eabb8a3b5ef4b27ac84d2dc07cb02c2671cdf877918c4e61dc83d0cacaec1741"
 }

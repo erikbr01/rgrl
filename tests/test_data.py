@@ -427,6 +427,90 @@ def test_manifest_provenance_edits_do_not_change_resolved_ids(tmp_path):
     )
 
 
+def test_expected_sha256_audit_lock_catches_drift(tmp_path):
+    """The expected_sha256 lock turns a silently-changed resolution (missing
+    curation, numpy RNG drift, edited seed/count) into a hard error."""
+    from rgrl.data import _load_selection_manifest, _episode_ids_sha256
+
+    store = _write_generative_store(tmp_path)
+    body = {
+        "schema_version": 2,
+        "name": "base",
+        "source": {"dataset_id": "gen"},
+        "seed": 7,
+        "select": [{"task": "alpha", "count": 3}],
+    }
+    manifest = tmp_path / "m.json"
+    # Correct lock resolves fine.
+    manifest.write_text(json.dumps(body))
+    good = _load_selection_manifest(manifest, store)["episode_ids"]
+    manifest.write_text(json.dumps({**body, "expected_sha256": _episode_ids_sha256(good)}))
+    assert _load_selection_manifest(manifest, store)["episode_ids"] == good
+    # A stale/wrong lock is rejected.
+    manifest.write_text(json.dumps({**body, "expected_sha256": "deadbeef"}))
+    with pytest.raises(ValueError, match="expected_sha256"):
+        _load_selection_manifest(manifest, store)
+
+
+def test_curation_must_reference_in_task_episodes(tmp_path):
+    from rgrl.data import _load_selection_manifest
+
+    store = _write_generative_store(tmp_path)
+    manifest = tmp_path / "m.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "name": "base",
+                "source": {"dataset_id": "gen"},
+                "seed": 7,
+                "select": [{"task": "alpha", "count": 3}],
+            }
+        )
+    )
+    beta_episode = next(e for e in range(10) if e % 5 >= 3)  # belongs to 'beta'
+    # Target crosses tasks (substitute must stay in-task).
+    (store / "curation.json").write_text(json.dumps({"alpha": {"0": beta_episode}}))
+    with pytest.raises(ValueError, match="stay in-task"):
+        _load_selection_manifest(manifest, store)
+    # Source is not a real episode of the task (stale/mistyped).
+    (store / "curation.json").write_text(json.dumps({"alpha": {"999": 1}}))
+    with pytest.raises(ValueError, match="not an episode"):
+        _load_selection_manifest(manifest, store)
+
+
+def test_generative_child_of_explicit_parent_is_rejected(tmp_path):
+    from rgrl.data import _load_selection_manifest
+
+    store = _write_generative_store(tmp_path)
+    parent = tmp_path / "explicit.json"
+    parent.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "name": "explicit",
+                "source": {"dataset_id": "gen"},
+                "episode_ids": [0, 1],
+            }
+        )
+    )
+    child = tmp_path / "child.json"
+    child.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "name": "child",
+                "source": {"dataset_id": "gen"},
+                "parent": "explicit.json",
+                "seed": 7,
+                "select": [{"task": "alpha", "count": 2}],
+            }
+        )
+    )
+    with pytest.raises(ValueError, match="explicit-episode_ids parent"):
+        _load_selection_manifest(child, store)
+
+
 @pytest.fixture
 def video_store_path(tmp_path):
     """A small robo_dataset VideoStore (4 episodes, one image key, one

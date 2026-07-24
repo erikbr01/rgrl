@@ -500,46 +500,38 @@ does not require the selected episodes to be physically rewritten. For a
 GPU-resident load, selected episodes can be concatenated once in memory. For
 the CPU/streaming path, reads remain against the original store.
 
-### Versioned selection manifests
+### Generative selection manifests (implemented)
 
-Move the long lists from `configs/data/*.yaml` into a small manifest namespace,
-for example:
+The long integer lists are gone from `configs/data/*.yaml` and from the
+manifests themselves. A `configs/selections/*.json` manifest (schema_version 2)
+is a generative recipe resolved at load time by `rgrl/data.py` against the
+store's `tasks.json`:
 
-```yaml
-schema_version: 1
-name: set_table_plusleft
-source:
-  dataset_id: droid_converted_v2_trimmed
-  fingerprint: sha256:...
-selection:
-  parent: set_table_baseline
-  add_episode_ids: [...]
-provenance:
-  generator: tools/generate_set_table_selection.py
-  seed: 42
-  predicates:
-    success: true
-    task: prepare plate - milk left
-counts:
-  total: 180
-  by_task: {...}
-split:
-  train_episode_ids: [...]
-  val_episode_ids: [...]
+```json
+{
+  "schema_version": 2,
+  "name": "set_table_plusleft",
+  "source": {"dataset_id": "droid_v2_trimmed"},
+  "parent": "set_table_baseline.json",
+  "seed": 42,
+  "select": [{"task": "prepare plate - milk left", "count": 60}],
+  "count": 180,
+  "expected_sha256": "..."
+}
 ```
 
-Hydra data configs then say only:
-
-```yaml
-source: droid_v2_trimmed
-selection: set_table_plusleft
-```
-
-Keep the generator in this repository rather than referring to an external
-`policy_graphs` script. Validate the manifest against the source fingerprint
-and test the intended algebra: baseline inclusion, exactly 60 additions, and
-disjoint follow-up additions. The current lists pass those checks; the goal is
-to make that property executable rather than documentary.
+Hydra data configs reference it with `selection_path:
+configs/selections/set_table_plusleft.json`. Semantics: a `parent` continues the
+same seeded draw, so two selections over one task sample without replacement
+(the follow-up splits); the success curation (unsuccessful→successful episode
+swaps) is baked into the store's `curation.json`, validated to stay in-task; and
+an explicit-`episode_ids` escape hatch covers externally-curated sets with no
+regenerable rule (`prepare_tray`). `count` is a human-readable check and
+`expected_sha256` is an audit lock over the resolved set — it turns a silently
+changed resolution (missing curation, numpy RNG drift, edited seed/count) into a
+hard error. The intended algebra (baseline inclusion, exactly 60 additions,
+disjoint follow-ups, exact reproduction of the historical sets) is executable in
+`tests/test_data.py` rather than documentary.
 
 ### Separate selection from sampling
 
