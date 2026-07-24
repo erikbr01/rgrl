@@ -76,6 +76,13 @@ scripts/train.sh data=tool_hang_state target=tool_hang_state training=bs1024
 # diffusion remains available for compatibility/ablations
 scripts/train.sh policy=diffusion_umi
 
+# normalization method is fit once at conversion and baked into the store cache
+# (part of its identity, so changing it rebuilds): minmax (default) | zscore
+# (mean/std) | minmax_p99 (1st/99th pct). Per-key fits run in parallel;
+# RGRL_STATS_WORKERS sets the process count (default: one per key, capped at CPU).
+RGRL_STATS_WORKERS=8 scripts/train.sh data=tool_hang_state target=tool_hang_state \
+  data.norm_method=zscore
+
 # weighted flow sampling is independent of dataset conversion/cache identity
 scripts/train.sh sampling=weighted sampling.weights_path=/path/to/weights.npy
 

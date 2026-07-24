@@ -370,6 +370,7 @@ def _convert(
         env_meta=env_meta,
         source=str(source_cfg["path"]),
         fps=20.0,
+        norm_method=source_cfg.get("norm_method", "minmax"),
         num_workers=num_workers,
     )
 
@@ -466,5 +467,6 @@ def _convert_from_store(
         env_meta={**source_cfg.get("env_meta", {}), "abs_action": source_cfg.get("abs_action", False)},
         source=str(store_path),
         fps=fps,
+        norm_method=source_cfg.get("norm_method", "minmax"),
         num_workers=num_workers,
     )

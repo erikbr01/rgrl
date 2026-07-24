@@ -401,3 +401,16 @@ def test_stats_workers_do_not_change_stats(synthetic_hdf5, tmp_path):
     a = json.loads((serial.path / "stats.json").read_text())
     b = json.loads((parallel.path / "stats.json").read_text())
     assert a == b and a  # non-empty and identical
+
+
+def test_norm_method_is_part_of_cache_identity(synthetic_hdf5, tmp_path):
+    # Changing the normalization method must rebuild the cache, never silently
+    # reuse stats fit with a different method.
+    source_cfg = _source_cfg(synthetic_hdf5)
+    target = source_cfg["shape_meta"]
+    cache_root = tmp_path / "cache"
+    mm = load_store({**source_cfg, "norm_method": "minmax"}, target, cache_root=cache_root)
+    zs = load_store({**source_cfg, "norm_method": "zscore"}, target, cache_root=cache_root)
+    assert mm.path != zs.path
+    assert json.loads((mm.path / "stats.json").read_text())["action"]["method"] == "minmax"
+    assert json.loads((zs.path / "stats.json").read_text())["action"]["method"] == "zscore"

@@ -946,3 +946,42 @@ def test_write_sidecars_streaming_and_parallel_match_full_array(tmp_path):
     ref = run("full", full)
     assert run("chunked", chunks, num_workers=1) == ref
     assert run("parallel", chunks, num_workers=4) == ref
+
+
+@pytest.mark.parametrize("method", ["minmax", "zscore", "minmax_p99"])
+def test_write_sidecars_norm_method_is_persisted(tmp_path, method):
+    import json
+
+    rng = np.random.default_rng(0)
+    d = tmp_path / method
+    d.mkdir()
+    write_sidecars(
+        d,
+        stats_keys={"action": rng.normal(size=(64, 2)).astype(np.float32)},
+        source="t",
+        norm_method=method,
+    )
+    stats = json.loads((d / "stats.json").read_text())["action"]
+    assert stats["method"] == method
+    assert len(stats["scale"]) == 2 and len(stats["offset"]) == 2
+
+
+def test_norm_methods_produce_different_fits(tmp_path):
+    import json
+
+    rng = np.random.default_rng(1)
+    arr = rng.normal(size=(200, 2)).astype(np.float32)
+    fits = {}
+    for method in ("minmax", "zscore", "minmax_p99"):
+        d = tmp_path / method
+        d.mkdir()
+        write_sidecars(d, stats_keys={"action": arr.copy()}, source="t", norm_method=method)
+        fits[method] = json.loads((d / "stats.json").read_text())["action"]["scale"]
+    assert fits["minmax"] != fits["zscore"] != fits["minmax_p99"]
+
+
+def test_write_sidecars_rejects_unknown_norm_method(tmp_path):
+    d = tmp_path / "x"
+    d.mkdir()
+    with pytest.raises(ValueError, match="norm_method"):
+        write_sidecars(d, stats_keys={"action": np.zeros((3, 2), np.float32)}, norm_method="bogus")
