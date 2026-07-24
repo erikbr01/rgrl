@@ -1,0 +1,67 @@
+# Shared spec for the four transport_mh salvage slices (all / random_cut /
+# salvaged / success_only). Those variants differ only in store_path + name;
+# abs_action, rename, env_meta, and shape_meta are identical and defined once
+# here. Not selectable on its own (no store_path/name) -- pick a concrete
+# slice with data=transport_mh_<slice>, each of which composes this base.
+abs_action: true
+rename: {}
+env_meta:
+  env_name: TwoArmTransport
+  type: 1
+  env_kwargs:
+    has_renderer: false
+    has_offscreen_renderer: false
+    ignore_done: true
+    use_object_obs: true
+    use_camera_obs: false
+    control_freq: 20
+    controller_configs:
+      type: OSC_POSE
+      input_max: 1
+      input_min: -1
+      output_max: [0.05, 0.05, 0.05, 0.5, 0.5, 0.5]
+      output_min: [-0.05, -0.05, -0.05, -0.5, -0.5, -0.5]
+      kp: 150
+      damping: 1
+      impedance_mode: fixed
+      kp_limits: [0, 300]
+      damping_limits: [0, 10]
+      position_limits: null
+      orientation_limits: null
+      uncouple_pos_ori: true
+      control_delta: true
+      interpolation: null
+      ramp_ratio: 0.2
+    robots: [Panda, Panda]
+    env_configuration: single-arm-opposed
+    camera_depths: false
+    camera_heights: 84
+    camera_widths: 84
+    reward_shaping: false
+shape_meta:
+  obs:
+    object:
+      shape: [41]
+      type: low_dim
+    robot0_eef_pos:
+      shape: [3]
+      type: low_dim
+    robot0_eef_quat:
+      shape: [4]
+      type: low_dim
+      quat_convention: xyzw
+    robot0_gripper_qpos:
+      shape: [2]
+      type: low_dim
+    robot1_eef_pos:
+      shape: [3]
+      type: low_dim
+    robot1_eef_quat:
+      shape: [4]
+      type: low_dim
+      quat_convention: xyzw
+    robot1_gripper_qpos:
+      shape: [2]
+      type: low_dim
+  action:
+    shape: [20]
