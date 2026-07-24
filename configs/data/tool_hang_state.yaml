@@ -1,5 +1,5 @@
 name: tool_hang_ph_lowdim
-path: /home/erbauer/diffusion_policy/data/robomimic/datasets/tool_hang/ph/low_dim.hdf5
+path: ${oc.env:RGRL_HOME_DATA_ROOT,/home/erbauer}/diffusion_policy/data/robomimic/datasets/tool_hang/ph/low_dim.hdf5
 abs_action: false
 rename: {}
 shape_meta:

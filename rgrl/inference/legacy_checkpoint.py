@@ -108,7 +108,14 @@ def build_legacy_policy(
 ) -> tuple[torch.nn.Module, EpisodeStore]:
     """Build the one recognized pre-shape_meta checkpoint format."""
     policy_name = tc.get("policy")
-    if policy_name not in _POLICIES or not isinstance(tc.get(policy_name), Mapping):
+    # isinstance guard first: a malformed new-format checkpoint can carry a dict
+    # under "policy", and `dict not in _POLICIES` would raise an opaque
+    # TypeError (unhashable) instead of this actionable schema error.
+    if (
+        not isinstance(policy_name, str)
+        or policy_name not in _POLICIES
+        or not isinstance(tc.get(policy_name), Mapping)
+    ):
         raise ValueError(
             "checkpoint has neither the current target/policy schema nor a "
             "recognized legacy diffusion/flow config"

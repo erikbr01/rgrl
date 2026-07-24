@@ -6,7 +6,7 @@ name: set_table_plusright
 # (--seed 42) guarantees the baseline's indices are a strict subset of
 # this split's, matching diffusion_policy's set_table_v2_plusright config.
 # The manifest stores only the 60 additions and inherits the baseline.
-store_path: /mnt/ssdB/erik/droid_converted_v2_trimmed
+store_path: ${oc.env:RGRL_DATA_ROOT,/mnt/ssdB/erik}/droid_converted_v2_trimmed
 dataset_id: droid_v2_trimmed
 abs_action: false
 rename: {}

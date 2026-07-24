@@ -374,3 +374,19 @@ def test_episode_ids_are_validated(video_store_path, tmp_path, episode_ids, mess
     source_cfg = _video_store_source_cfg(video_store_path, episode_ids=episode_ids)
     with pytest.raises((TypeError, ValueError), match=message):
         load_store(source_cfg, source_cfg["shape_meta"], cache_root=tmp_path / "cache")
+
+
+def test_short_prefix_collision_detected_by_full_hash(tmp_path):
+    # A genuine 32-bit prefix collision (different full hash) is distinguishable
+    # from an in-place tamper (same full hash, edited content); only the former
+    # should route to a fallback directory. Tampering stays a hard error.
+    from rgrl.data import _MANIFEST_FILE, _is_short_prefix_collision
+
+    d = tmp_path / "cache_dir"
+    d.mkdir()
+    (d / _MANIFEST_FILE).write_text(json.dumps({"hash": "aaaa", "payload": 1}))
+    assert _is_short_prefix_collision(d, {"hash": "bbbb"}) is True   # different config
+    assert _is_short_prefix_collision(d, {"hash": "aaaa"}) is False  # same identity
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    assert _is_short_prefix_collision(empty, {"hash": "aaaa"}) is False

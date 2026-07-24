@@ -193,6 +193,40 @@ def _fsync_directory(path: Path) -> None:
         os.close(fd)
 
 
+def _fsync_tree(path: Path) -> None:
+    """Flush every file and directory under `path` to stable storage. Without
+    this, the atomic os.replace() can publish a cache whose file contents are
+    still only in the page cache, so a power loss right after publish would
+    leave existing-but-truncated meta/stats behind (which the existence-only
+    verify would then accept, silently corrupting normalization)."""
+    for child in sorted(path.rglob("*")):
+        if child.is_dir():
+            _fsync_directory(child)
+        elif child.is_file():
+            fd = os.open(child, os.O_RDONLY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+    _fsync_directory(path)
+
+
+def _is_short_prefix_collision(cache_dir: Path, expected_doc: dict) -> bool:
+    """True iff `cache_dir` holds a cache built for a *different full hash* —
+    i.e. a genuine 32-bit short-prefix collision between two distinct configs
+    sharing a name. Distinct from tampering (same full hash, edited content),
+    which _verify_cache must still surface as an error rather than route around.
+    On a missing/unreadable manifest, defer to the normal path (returns False)."""
+    manifest = cache_dir / _MANIFEST_FILE
+    if not manifest.exists():
+        return False
+    try:
+        on_disk = json.loads(manifest.read_text())
+    except (OSError, ValueError):
+        return False
+    return on_disk.get("hash") != expected_doc["hash"]
+
+
 def _verify_cache(cache_dir: Path, expected_doc: dict) -> None:
     missing = [f for f in _EXPECTED_FILES if not (cache_dir / f).exists()]
     if expected_doc["source_cfg"].get("episode_ids") is not None:
@@ -229,7 +263,13 @@ def load_store(source_cfg, target_shape_meta, cache_root: str | Path = "data/cac
     doc = _manifest_document(source_cfg, target_shape_meta, source_kind)
     cache_root = Path(cache_root)
     cache_root.mkdir(parents=True, exist_ok=True)
+    # Short 32-bit suffix keeps directory names readable. Two distinct manifests
+    # sharing the same name could in principle collide on it; if the short dir
+    # already holds a *different* manifest, fall back to the full digest so the
+    # colliding identity stays cacheable instead of erroring forever.
     cache_dir = cache_root / f"{source_cfg['name']}-{doc['hash'][:8]}"
+    if cache_dir.exists() and _is_short_prefix_collision(cache_dir, doc):
+        cache_dir = cache_root / f"{source_cfg['name']}-{doc['hash']}"
     lock_path = cache_root / f".{cache_dir.name}.lock"
 
     with _cache_lock(lock_path):
@@ -256,6 +296,7 @@ def load_store(source_cfg, target_shape_meta, cache_root: str | Path = "data/cac
                 json.dumps(doc, indent=1, sort_keys=True)
             )
             _verify_cache(tmp_dir, doc)
+            _fsync_tree(tmp_dir)
             os.replace(tmp_dir, cache_dir)
             _fsync_directory(cache_root)
         except Exception:

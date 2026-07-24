@@ -252,10 +252,26 @@ def _restore_rng_state(state: dict) -> None:
     random.setstate(state["python"])
     np.random.set_state(state["numpy"])
     torch.set_rng_state(state["torch_cpu"])
-    if state.get("torch_cuda") is not None:
+    saved_cuda = state.get("torch_cuda")
+    if saved_cuda is not None:
         if not torch.cuda.is_available():
             raise RuntimeError("checkpoint contains CUDA RNG state but CUDA is unavailable")
-        torch.cuda.set_rng_state_all(state["torch_cuda"])
+        current = torch.cuda.device_count()
+        if len(saved_cuda) == current:
+            torch.cuda.set_rng_state_all(saved_cuda)
+        else:
+            # Resuming on a host with a different visible-GPU count than the one
+            # that wrote the checkpoint. set_rng_state_all() requires an exact
+            # length match, so restore the 1:1 overlap per device and leave any
+            # remaining generators at their already-seeded state.
+            log.warning(
+                "checkpoint carries %d CUDA RNG state(s) but this host exposes %d GPU(s); "
+                "restoring the overlapping devices only",
+                len(saved_cuda),
+                current,
+            )
+            for i in range(min(len(saved_cuda), current)):
+                torch.cuda.set_rng_state(saved_cuda[i], device=i)
 
 
 def _fsync_directory(path: Path) -> None:
@@ -436,6 +452,9 @@ def _train(
                 "output directory or an explicit resume mode"
             )
     elif latest_path.exists():
+        # weights_only=False is required: the payload carries pickled Python and
+        # NumPy RNG state plus the resolved config, which the safe loader rejects.
+        # Only ever resume from run directories you trust.
         checkpoint = torch.load(latest_path, map_location=device, weights_only=False)
     elif cfg.resume in {"required", "extend"}:
         raise FileNotFoundError(f"resume={cfg.resume!r} requires {latest_path}")
@@ -465,7 +484,8 @@ def _train(
         policy.load_state_dict(checkpoint["model"])
         ema.load_state_dict(checkpoint["ema"])
         start_step = int(checkpoint["step"])
-        saved_target_steps = int(checkpoint.get("target_steps", start_step))
+        raw_target_steps = checkpoint.get("target_steps")
+        saved_target_steps = int(raw_target_steps) if raw_target_steps is not None else None
         wandb_id = checkpoint.get("wandb_id")
 
         if start_step > recipe.steps:
@@ -473,7 +493,13 @@ def _train(
                 f"checkpoint is at step {start_step}, beyond requested target "
                 f"{recipe.steps}; refusing to regress latest.pt"
             )
-        if recipe.steps != saved_target_steps:
+        if saved_target_steps is None:
+            # Legacy checkpoint with no recorded target (only ever reached with
+            # resume_allow_legacy=true): treat this as a plain continuation to
+            # the current target. The start_step > recipe.steps guard above
+            # still prevents regressing latest.pt.
+            pass
+        elif recipe.steps != saved_target_steps:
             if cfg.resume != "extend":
                 raise RuntimeError(
                     f"checkpoint target was {saved_target_steps} steps but current "
@@ -517,6 +543,11 @@ def _train(
         opt.load_state_dict(checkpoint["optimizer"])
         sched.load_state_dict(checkpoint["scheduler"])
 
+    # Snapshot the post-seed RNG on a fresh run so that wandb.init()/generate_id()
+    # (which may draw from the global RNG) cannot fork the training noise stream:
+    # the same seed must give the same trajectory whether or not W&B is enabled.
+    fresh_rng = _capture_rng_state() if checkpoint is None else None
+
     if cfg.compile:
         policy.loss = torch.compile(policy.loss)
 
@@ -537,6 +568,8 @@ def _train(
 
     if checkpoint is not None and not legacy_resume:
         _restore_rng_state(checkpoint["rng"])
+    elif fresh_rng is not None:
+        _restore_rng_state(fresh_rng)
 
     last_saved_step: int | None = None
 
@@ -605,14 +638,19 @@ def _train(
             if device.type == "cuda":
                 with torch.cuda.device(device):
                     torch.cuda.manual_seed(cfg.val_seed)
-            weighted_loss = torch.zeros((), device=device)
-            count = 0
+            # Pool a true element-weighted mean: accumulate the squared-error
+            # sum and the valid-element count separately, so the variable
+            # prefix denominator and a short final batch are weighted correctly
+            # (weighting per-batch means by sample count is not the same thing).
+            total_sq_error = torch.zeros((), device=device)
+            total_elements = torch.zeros((), device=device)
             with torch.no_grad(), autocast:
                 for ids in torch.arange(val.num_samples).split(cfg.batch_size):
                     batch = val.gather(ids)
-                    weighted_loss += policy.loss(batch) * len(ids)
-                    count += len(ids)
-            vloss = (weighted_loss / count).item()
+                    sq_error, elements = policy.loss_terms(batch)
+                    total_sq_error += sq_error
+                    total_elements += elements
+            vloss = (total_sq_error / total_elements).item()
         log.info(f"step {step:>7} samples {step * cfg.batch_size:>10} val_loss {vloss:.4f}")
         if run:
             run.log({"val_loss": vloss, "samples_seen": step * cfg.batch_size}, step=step)
@@ -631,6 +669,12 @@ def _train(
                 one_step(step)
                 step += 1
                 tracer.step()
+                # These are real optimizer updates, so honor the checkpoint
+                # cadence — a save boundary landing inside the trace window must
+                # not be silently skipped. (Validation is left out on purpose so
+                # it doesn't pollute the trace.)
+                if step % recipe.save_every == 0:
+                    save(step)
         log.info(
             f"chrome trace ({cfg.trace_steps} active steps, global step now {step}) "
             f"-> {out / 'trace.json'}"

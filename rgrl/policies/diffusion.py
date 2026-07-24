@@ -9,7 +9,6 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 import torch
-import torch.nn.functional as F
 from robo_dataset.normalization import KeyNormalizer
 from torch import nn
 
@@ -124,8 +123,19 @@ class DiffusionPolicy(nn.Module):
         """Training entry point over a raw dataset batch."""
         return self.compute_loss(apply_pipeline(self.data_transforms_pipeline, batch))
 
+    def loss_terms(self, batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
+        """(squared-error sum, valid-element count) over a raw batch. Lets a
+        validation pass pool a true element-weighted mean across batches rather
+        than averaging per-batch means -- the latter mis-weights both the
+        variable prefix denominator and the short final batch."""
+        return self._loss_sum_weight(apply_pipeline(self.data_transforms_pipeline, batch))
+
     def compute_loss(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
-        """Backward-compatible loss over an already-preprocessed batch."""
+        """Backward-compatible mean loss over an already-preprocessed batch."""
+        total, weight = self._loss_sum_weight(batch)
+        return total / weight
+
+    def _loss_sum_weight(self, batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
         cfg = self.cfg
         cond = self.enc(batch)
         actions = self.action_norm(batch["action"])
@@ -138,7 +148,8 @@ class DiffusionPolicy(nn.Module):
             pred = self.unet(noisy, t, cond)
             # no pad masking: padded actions are edge-replicated, matching the
             # reference implementation's training objective
-            return F.mse_loss(pred, noise)
+            err = (pred - noise) ** 2
+            return err.sum(), err.numel()
 
         # Train-time RTC: clean (jittered) actions substituted at the prefix,
         # flagged by the mask channel; epsilon loss only where there is
@@ -150,7 +161,8 @@ class DiffusionPolicy(nn.Module):
         noisy = torch.where(prefix_mask, clean, noisy)
         pred = self.unet(torch.cat([noisy, prefix_mask.to(noisy.dtype)], dim=-1), t, cond)
         postfix = ~prefix_mask
-        return ((pred - noise) ** 2 * postfix).sum() / (postfix.sum() * self.act_dim + 1e-8)
+        err = (pred - noise) ** 2 * postfix
+        return err.sum(), postfix.sum() * self.act_dim + 1e-8
 
     def _sample(self, x: torch.Tensor, cond: torch.Tensor, prefix: torch.Tensor | None, start: int) -> torch.Tensor:
         """The shared denoising loop. If `prefix` is given ((B, P, act_dim),

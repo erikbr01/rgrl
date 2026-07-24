@@ -1,5 +1,5 @@
 name: transport_mh_salvaged_lowdim
-store_path: /mnt/ssdB/erik/policy_graphs/data/salvage/transport_mh_250/robomimic/transport/mh/salvaged
+store_path: ${oc.env:RGRL_DATA_ROOT,/mnt/ssdB/erik}/policy_graphs/data/salvage/transport_mh_250/robomimic/transport/mh/salvaged
 abs_action: true
 rename: {}
 env_meta:

@@ -1,5 +1,5 @@
 name: square_mh_lowdim
-path: /mnt/ssdB/erik/cupid_data/robomimic/datasets/square/mh/low_dim_v15.hdf5
+path: ${oc.env:RGRL_DATA_ROOT,/mnt/ssdB/erik}/cupid_data/robomimic/datasets/square/mh/low_dim_v15.hdf5
 abs_action: false
 rename: {}
 # The hdf5's own env_args were recorded with robosuite 1.5.1 (nested "BASIC"

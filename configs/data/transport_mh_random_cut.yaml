@@ -1,5 +1,5 @@
 name: transport_mh_random_cut_lowdim
-store_path: /mnt/ssdB/erik/policy_graphs/data/salvage/transport_mh_250/robomimic/transport/mh/random_cut
+store_path: ${oc.env:RGRL_DATA_ROOT,/mnt/ssdB/erik}/policy_graphs/data/salvage/transport_mh_250/robomimic/transport/mh/random_cut
 abs_action: true
 rename: {}
 env_meta:

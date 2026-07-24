@@ -79,7 +79,13 @@ def _env_kwargs(
         except ImportError:
             pass
     if abs_action:
-        kwargs["controller_configs"]["control_delta"] = False
+        controller = kwargs.get("controller_configs")
+        if not isinstance(controller, dict):
+            raise ValueError(
+                "abs_action=True needs env_kwargs.controller_configs (an OSC_POSE "
+                "controller config) to set control_delta=False, but none was present"
+            )
+        controller["control_delta"] = False
     return kwargs
 
 

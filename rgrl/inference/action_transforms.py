@@ -15,7 +15,7 @@ short enough to keep local, in keeping with rgrl's no-heavy-deps design.
 Absolute vs. delta actions is a separate axis from the rotation
 representation: a store's `abs_action` flag also needs the env's controller
 reconfigured to accept absolute poses (`control_delta: False`) — see
-rgrl/inference/robomimic_env.py, which does that reconfiguration and calls
+rgrl/inference/envs/robomimic.py, which does that reconfiguration and calls
 `undo_abs_rotation_action` before every env.step().
 """
 
@@ -42,9 +42,27 @@ def rotation_6d_to_axis_angle(rot6d: np.ndarray) -> np.ndarray:
         axis=-1,
     )
     sin_theta = np.sin(theta)
-    small = np.abs(sin_theta) < 1e-8
+    # Generic branch: (R - R^T) is 2 sin(theta) * skew(axis), so theta/(2 sin)
+    # recovers the axis-angle vector. small covers both theta ~= 0 (-> 0) and
+    # the theta ~= pi singularity, handled separately below.
+    small = np.abs(sin_theta) < 1e-6
     scale = np.where(small, 0.0, theta / np.where(small, 1.0, 2 * sin_theta))
-    return axis * scale[..., None]
+    out = axis * scale[..., None]
+
+    # theta ~= pi: sin(theta) -> 0 makes the antisymmetric part vanish, so the
+    # generic branch collapses to ~0 instead of pi*axis. Recover the axis from
+    # the symmetric part R + I = 2 n n^T (its largest-norm column is parallel to
+    # the axis), signed from the tiny antisymmetric part.
+    near_pi = small & (cos_theta < 0)
+    if np.any(near_pi):
+        rp = r + np.eye(3)
+        col = np.argmax(np.linalg.norm(rp, axis=-2), axis=-1)
+        axis_pi = np.take_along_axis(rp, col[..., None, None], axis=-1)[..., 0]
+        axis_pi = axis_pi / (np.linalg.norm(axis_pi, axis=-1, keepdims=True) + 1e-12)
+        sign = np.sign((axis * axis_pi).sum(-1, keepdims=True))
+        sign = np.where(sign == 0, 1.0, sign)
+        out = np.where(near_pi[..., None], np.pi * axis_pi * sign, out)
+    return out
 
 
 def undo_abs_rotation_action(action: np.ndarray) -> np.ndarray:

@@ -454,3 +454,54 @@ def test_build_policy_ckpt_given_returns_local_policy(monkeypatch):
     assert isinstance(policy, LocalPolicy)
     assert str(captured["ckpt_path"]) == "runs/x/latest.pt"
     assert captured["device"] == torch.device("cpu")
+
+
+def _rodrigues(rotvec):
+    theta = float(np.linalg.norm(rotvec))
+    if theta < 1e-12:
+        return np.eye(3)
+    k = np.asarray(rotvec) / theta
+    K = np.array([[0, -k[2], k[1]], [k[2], 0, -k[0]], [-k[1], k[0], 0]])
+    return np.eye(3) + np.sin(theta) * K + (1 - np.cos(theta)) * (K @ K)
+
+
+def test_rotation_6d_to_axis_angle_round_trips_including_pi():
+    # The rot6d->axis-angle map must recover the rotation everywhere, including
+    # the theta~=pi log-map singularity where the antisymmetric part vanishes.
+    from rgrl.inference.action_transforms import rotation_6d_to_axis_angle
+
+    rng = np.random.default_rng(0)
+    axis = np.array([0.3, -0.7, 0.5])
+    axis = axis / np.linalg.norm(axis)
+    cases = [rng.normal(size=3) / np.linalg.norm(rng.normal(size=3)) * rng.uniform(0, np.pi) for _ in range(300)]
+    cases += [axis * np.pi, axis * (np.pi - 1e-9), -axis * np.pi, axis * 1e-10]
+    for rotvec in cases:
+        r = _rodrigues(rotvec)
+        rot6d = np.concatenate([r[0], r[1]])  # first two rows (the fn's convention)
+        recovered = rotation_6d_to_axis_angle(rot6d)
+        # compare as rotations (axis sign is genuinely ambiguous at exactly pi)
+        assert np.allclose(_rodrigues(recovered), r, atol=1e-4), (rotvec, recovered)
+
+
+def test_undo_abs_rotation_action_shapes_and_gripper_passthrough():
+    from rgrl.inference.action_transforms import undo_abs_rotation_action
+
+    # dual-arm: 20-dim (pos3+rot6d6+grip1 per arm) -> 14-dim (pos3+aa3+grip1)
+    action = np.zeros((5, 20))
+    action[..., 3:9] = np.tile(np.array([1.0, 0, 0, 0, 1.0, 0]), (5, 1))  # identity rot6d, arm 0
+    action[..., 13:19] = np.tile(np.array([1.0, 0, 0, 0, 1.0, 0]), (5, 1))  # arm 1
+    action[..., 2] = 0.7  # arm-0 z position
+    action[..., 9] = -1.0  # arm-0 gripper
+    out = undo_abs_rotation_action(action)
+    assert out.shape == (5, 14)
+    assert np.allclose(out[..., 3:6], 0.0, atol=1e-6)  # identity -> zero axis-angle
+    assert np.allclose(out[..., 2], 0.7)  # position preserved
+    assert np.allclose(out[..., 6], -1.0)  # gripper preserved
+
+
+def test_abs_action_env_kwargs_requires_controller_config():
+    from rgrl.inference.envs.robomimic import _env_kwargs
+
+    meta = {"env_name": "X", "env_kwargs": {}}  # no controller_configs
+    with pytest.raises(ValueError, match="controller_configs"):
+        _env_kwargs(meta, [], None, abs_action=True)

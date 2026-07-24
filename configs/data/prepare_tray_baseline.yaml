@@ -1,5 +1,5 @@
 name: prepare_tray_baseline
-store_path: /home/erbauer/policy_graphs/data/droid_converted_prepare_tray_trimmed
+store_path: ${oc.env:RGRL_HOME_DATA_ROOT,/home/erbauer}/policy_graphs/data/droid_converted_prepare_tray_trimmed
 dataset_id: droid_prepare_tray_trimmed
 abs_action: false
 rename: {}

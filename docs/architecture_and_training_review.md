@@ -20,7 +20,7 @@ The `robo_dataset` work is captured in local submodule commit `64bb0a5`
 | Experiment state | Policy initialization is seeded at the application boundary. Checkpoints now contain model, EMA, optimizer, scheduler, all RNG states, exact batch cursor, sample count, W&B identity, schema version, and a compatibility fingerprint. |
 | Checkpoint safety | A checkpoint is serialized once, fsynced, atomically renamed, and published through an atomically replaced relative `latest.pt` symlink. Completed/lower-target runs cannot overwrite progress; extensions are explicit. |
 | Legacy inference | Pre-shape-meta diffusion and flow checkpoints load through an isolated compatibility module that requires and validates the original store sidecars. It never guesses image modalities from dtype. |
-| Validation | Validation uses an isolated fixed RNG stream, computes a sample-weighted mean, validates split sizes, and does not change subsequent training updates. |
+| Validation | Validation uses an isolated fixed RNG stream, pools a true element-weighted mean (accumulating the squared-error sum and valid-element count, so the variable prefix denominator and a short final batch are weighted correctly), validates split sizes, and does not change subsequent training updates. |
 | Recipe semantics | Training, warmup, logging, validation, and checkpoint cadence can all be expressed in samples. The DROID recipes use explicit 51.2M/76.8M sample budgets. |
 | Sampling | Uniform/weighted sampling is a separate Hydra group. Resident and shared-memory modes use the same deterministic epoch order and resume from the exact next batch. |
 | Episode subsets | DROID subset IDs moved into versioned manifests with parent/addition composition and executable provenance checks. `EpisodeView` maps logical episodes to the original physical store without copying or re-encoding videos. |
@@ -31,7 +31,7 @@ The `robo_dataset` work is captured in local submodule commit `64bb0a5`
 | Image work | The common native-image path crops uint8 NHWC before float/NCHW expansion. An opt-in shared camera ResNet concatenates camera batches into one forward. Key-sanitization collisions now fail fast and camera transform order is deterministic. |
 | Flow matching | Rectified flow is the default training policy. DROID launchers use DiT flow matching. Diffusion remains supported for old checkpoints and controlled comparisons. |
 | Robosuite integration | Simulation now uses modern Robosuite/MuJoCo directly. The legacy Robomimic runtime dependency and its `mujoco_py` import workaround were removed. A direct, atomic raw-state-to-image renderer preserves Robomimic-compatible HDF5 metadata and filters subset masks to episodes actually emitted. |
-| Launch/config hygiene | Five DROID scripts now call one generic flow-matching launcher. Generic inference defaults no longer carry a diffusion-specific name. Development dependencies, Ruff correctness checks, and CPU CI were added. |
+| Launch/config hygiene | Five DROID scripts now call one generic flow-matching launcher. Generic inference defaults no longer carry a diffusion-specific name. Development dependencies and Ruff correctness checks were added (run locally; the GitHub CI workflow was intentionally removed as unnecessary for this repo). |
 
 ### Attributed performance results
 
@@ -105,7 +105,7 @@ path was therefore checked at each boundary:
 | Raw state → rendered HDF5 | Replayed 15 recorded states spanning demos 0, 7, and 15 through modern Robosuite | Both camera tensors and every requested low-dimensional scalar were exact |
 | Rendered HDF5 → training cache | Exhaustively compared all six policy keys in all 200 episodes | **95,962/95,962 frames exact**; zero unequal camera, proprioception, or action scalars |
 | Episode windows | Checked start/interior/end anchors in every subset episode and added a synthetic image regression test | Observation is `[t-1,t]`; prediction slot `obs_horizon-1` is action `t`; padding never crosses episodes; uint8 NHWC is preserved |
-| Image preprocessing | Compared actual ToolHang pixels against the former float-first pipeline and explicit center crop | Seeded training random crops and evaluation center crops were bit-exact; output is float NCHW in `[0,1]` |
+| Image preprocessing | Compared actual ToolHang pixels against the former float-first pipeline and explicit center crop | In eager mode, seeded training random crops and evaluation center crops were bit-exact; output is float NCHW in `[0,1]`. Under the default `torch.compile`, the crop's RNG now runs inside the compiled loss and is not bit-identical to the former eager crop (it is still a valid, run-to-run-deterministic seeded crop) |
 | Camera convention | Compared the direct renderer to the former official wrapper on a complete 681-frame episode | Camera bytes were identical, including vertical orientation |
 | Shared inference stack | Loaded the known-good legacy Lift diffusion image checkpoint through the current loader and direct simulator adapter | **49/50 (98%)**, matching its historical result |
 | Current flow + image stack | Trained a fresh 1.28M-sample Lift FlowPolicy and evaluated its EMA checkpoint | **50/50 (100%)** |

@@ -5,7 +5,7 @@ name: set_table_baseline
 # The selection manifest owns the seed-42 60-right + 60-middle baseline,
 # success replacements, and provenance. It resolves to a zero-copy logical
 # EpisodeView over this three-camera physical store.
-store_path: /mnt/ssdB/erik/droid_converted_v2_trimmed
+store_path: ${oc.env:RGRL_DATA_ROOT,/mnt/ssdB/erik}/droid_converted_v2_trimmed
 dataset_id: droid_v2_trimmed
 abs_action: false
 rename: {}

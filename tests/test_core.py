@@ -742,13 +742,21 @@ class _TinyRandomLossPolicy(nn.Module):
         self.net = nn.Linear(2 * 3, 4 * 2)
         self.data_transforms_pipeline = None
 
-    def compute_loss(self, batch):
+    def _loss_sum_weight(self, batch):
         prediction = self.net(batch["state"].flatten(1)).reshape(-1, 4, 2)
         target = batch["action"] + 0.1 * torch.randn_like(batch["action"])
-        return (prediction - target).square().mean()
+        err = (prediction - target).square()
+        return err.sum(), err.numel()
+
+    def compute_loss(self, batch):
+        total, weight = self._loss_sum_weight(batch)
+        return total / weight
 
     def loss(self, batch):
         return self.compute_loss(batch)
+
+    def loss_terms(self, batch):
+        return self._loss_sum_weight(batch)
 
 
 def _tiny_train_cfg(out, **overrides):

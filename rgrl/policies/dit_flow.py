@@ -18,7 +18,6 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 import torch
-import torch.nn.functional as F
 from robo_dataset.normalization import KeyNormalizer
 from torch import nn
 
@@ -94,8 +93,19 @@ class DiTFlowPolicy(nn.Module):
         """Training entry point over a raw dataset batch."""
         return self.compute_loss(apply_pipeline(self.data_transforms_pipeline, batch))
 
+    def loss_terms(self, batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
+        """(squared-error sum, valid-element count) over a raw batch. Lets a
+        validation pass pool a true element-weighted mean across batches rather
+        than averaging per-batch means -- the latter mis-weights both the
+        variable prefix denominator and the short final batch."""
+        return self._loss_sum_weight(apply_pipeline(self.data_transforms_pipeline, batch))
+
     def compute_loss(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
-        """Backward-compatible loss over an already-preprocessed batch."""
+        """Backward-compatible mean loss over an already-preprocessed batch."""
+        total, weight = self._loss_sum_weight(batch)
+        return total / weight
+
+    def _loss_sum_weight(self, batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
         cfg = self.cfg
         obs_vec = self.obs_proj(self.enc(batch))
         actions = self.action_norm(batch["action"])
@@ -125,8 +135,10 @@ class DiTFlowPolicy(nn.Module):
         u = noise - actions  # velocity toward noise; integrate t: 1 -> 0
         if prefix_mask is not None:
             postfix = ~prefix_mask
-            return ((u - v) ** 2 * postfix).sum() / (postfix.sum() * self.act_dim + 1e-8)
-        return F.mse_loss(v, u)
+            err = (u - v) ** 2 * postfix
+            return err.sum(), postfix.sum() * self.act_dim + 1e-8
+        err = (v - u) ** 2
+        return err.sum(), err.numel()
 
     @torch.no_grad()
     def predict_action(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:

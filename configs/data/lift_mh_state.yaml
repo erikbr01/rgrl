@@ -1,5 +1,5 @@
 name: lift_mh_lowdim
-path: /mnt/ssdB/erik/cupid_data/robomimic/datasets/lift/mh/low_dim.hdf5
+path: ${oc.env:RGRL_DATA_ROOT,/mnt/ssdB/erik}/cupid_data/robomimic/datasets/lift/mh/low_dim.hdf5
 abs_action: false
 rename: {}
 shape_meta:

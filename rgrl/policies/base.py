@@ -58,7 +58,7 @@ class ObsEncoder(nn.Module):
         if len(module_keys) != len(set(module_keys)):
             collisions = {
                 module_key: [key for key in all_keys if key.replace(".", "_") == module_key]
-                for module_key in set(module_keys)
+                for module_key in sorted(set(module_keys))
                 if module_keys.count(module_key) > 1
             }
             raise ValueError(

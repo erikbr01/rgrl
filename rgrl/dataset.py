@@ -132,11 +132,15 @@ def _split_sample_weights(
         raise ValueError("sample_weights sum to 0 for this split — nothing to sample")
     if val_split == "train":
         total = split_weights.sum()
-        ess = (total**2 / (len(split_weights) * split_weights.square().sum())).item()
+        n = len(split_weights)
+        # Kish effective sample size (Sw)^2 / S(w^2); ess_frac normalizes it to
+        # [0, 1]. Log the absolute count and the fraction explicitly so the
+        # value can't be misread as "0.30 effective samples".
+        ess_frac = (total**2 / (n * split_weights.square().sum())).item()
         zero_frac = (split_weights == 0).float().mean().item()
         log.info(
-            f"[weighted-sampling] {len(split_weights)} train samples, "
-            f"ESS={ess:.3f} zero_frac={zero_frac:.3f}"
+            f"[weighted-sampling] {n} train samples, "
+            f"ESS={ess_frac * n:.0f} ({ess_frac:.3f} of N) zero_frac={zero_frac:.3f}"
         )
     return split_weights
 

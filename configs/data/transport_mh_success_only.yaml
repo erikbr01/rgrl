@@ -1,5 +1,5 @@
 name: transport_mh_success_only_lowdim
-store_path: /mnt/ssdB/erik/policy_graphs/data/salvage/transport_mh_250/robomimic/transport/mh/success_only
+store_path: ${oc.env:RGRL_DATA_ROOT,/mnt/ssdB/erik}/policy_graphs/data/salvage/transport_mh_250/robomimic/transport/mh/success_only
 abs_action: true
 rename: {}
 env_meta:
