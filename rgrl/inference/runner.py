@@ -105,6 +105,10 @@ class BatchRecord:
     chunk_latencies_ms: list = field(default_factory=list)
     # Streaming mode only: leading steps taken before the first chunk arrived.
     n_warmup_steps: int = 0
+    # sync mode: per-env step index at which the episode finished (success);
+    # max_timesteps for envs that never finished. Enables throughput
+    # (mean steps-to-success) alongside success rate.
+    done_steps: np.ndarray | None = None
 
 
 Profiler = Callable[[str], "object"]  # name -> context manager, e.g. rgrl.profiler.SectionProfiler
@@ -193,6 +197,7 @@ class Runner:
         B = self.env.num_envs
         dt = 1.0 / self.control_hz if self.control_hz else None
         done = np.zeros(B, dtype=bool)
+        done_step = np.full(B, self.max_timesteps, dtype=int)  # steps-to-success per env
         chunk: np.ndarray | None = None
         chunk_idx = 0
         n_chunks = 0
@@ -220,15 +225,19 @@ class Runner:
             with self._profiler("env"):
                 obs, _, dones_step, _ = self.env.step(actions, active=~done)
             self.policy.observe(obs)
+            prev_done = done
             done = done | dones_step
             total_steps += 1
+            done_step[done & ~prev_done] = total_steps  # step at which each env finished
 
             if dt is not None:
                 elapsed = time.time() - t0
                 if elapsed < dt:
                     time.sleep(dt - elapsed)
 
-        return self._make_record(B, total_steps, n_chunks, 0, latencies, done)
+        rec = self._make_record(B, total_steps, n_chunks, 0, latencies, done)
+        rec.done_steps = done_step
+        return rec
 
     # ------------------------------------------------------------------
     # ASYNC_CHUNK mode

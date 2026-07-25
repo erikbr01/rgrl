@@ -168,6 +168,7 @@ def _evaluate(
     )
 
     successes: list[bool] = []
+    steps_to_success: list[int] = []  # per successful episode (throughput)
     t_start = time.perf_counter()
     remaining, chunk_num = env_cfg.episodes, 0
     while remaining > 0:
@@ -175,7 +176,10 @@ def _evaluate(
             env.set_seed(env_cfg.seed + chunk_num * n_envs)  # matches pre-refactor per-env seeding exactly
         record = runner.run_batch()
         take = min(n_envs, remaining)
-        successes += record.dones[:take].tolist()
+        dones_take = record.dones[:take]
+        successes += dones_take.tolist()
+        if record.done_steps is not None:  # steps-to-success for the finished (successful) envs
+            steps_to_success += record.done_steps[:take][dones_take].tolist()
         remaining -= take
         chunk_num += 1
         log.info(f"episodes {len(successes):>3}/{env_cfg.episodes} success {sum(successes)}/{len(successes)}")
@@ -186,6 +190,11 @@ def _evaluate(
     summary = {
         "success_rate": sum(successes) / len(successes),
         "episodes": env_cfg.episodes,
+        # THROUGHPUT: mean steps-to-success over successful episodes (lower = faster
+        # policy); efficiency dimension beyond success rate (e.g. length-curation
+        # may yield faster policies). null if no successes.
+        "mean_steps_to_success": (round(sum(steps_to_success) / len(steps_to_success), 1)
+                                  if steps_to_success else None),
         "ckpt": str(ckpt),
         "step": step,
         "wall_s": round(time.perf_counter() - t_start, 1),
