@@ -1,8 +1,8 @@
 # DROID DiT flow recipe (set_table / prepare_tray baselines).
 #
-# batch_size 256 (the repo default, with the default lr 1e-4): it fits now that
-# the baselines train on two cameras (wrist_image_left + exterior) instead of
-# three, freeing the per-camera encoder activations the third stream consumed.
+# batch_size 128 (with the default lr 1e-4): the largest that fits a 24 GB 4090
+# now that the baselines train on two cameras (wrist_image_left + exterior)
+# rather than three -- 160/192/256 all OOM (measured). 2x the old batch 64.
 # The data path is auto (CPU/shared-host gathers with pinned H2D on a side
 # stream) with a single producer thread -- workers=0 beats multiprocessing
 # large image batches (IPC/contention). 300k optimizer steps is the baseline
@@ -11,8 +11,14 @@ defaults:
   - default
   - _self_
 
-batch_size: 256
+batch_size: 128
 data_mode: auto
 dataloader_workers: 0
 steps: 300000
 save_every: 100000
+# compile_mode default (the mode every DROID run has used). Overrides the repo
+# default of max-autotune, whose autotuning phase spikes GPU memory on top of
+# steady-state and OOMs above ~batch 64 on DROID's large images -- it was only
+# ever validated on small-image ToolHang.
+compile_mode: default
+# compile_mode: max-autotune   # ~5% faster steady-state, but OOMs at DROID batch sizes
