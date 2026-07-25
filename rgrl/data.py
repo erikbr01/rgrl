@@ -23,6 +23,7 @@ import logging
 import os
 import shutil
 import uuid
+from collections import Counter, defaultdict
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -49,82 +50,237 @@ def _hash_document(value: dict) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
 
-def _load_selection_manifest(path: Path, seen: tuple[Path, ...] = ()) -> dict:
-    """Resolve a versioned selection, including optional parent + additions."""
-    path = path.resolve()
-    if path in seen:
-        chain = " -> ".join(str(item) for item in (*seen, path))
-        raise ValueError(f"selection manifest parent cycle: {chain}")
+def _store_task_episodes(store_path: Path) -> dict[str, list[int]]:
+    """Read the store's tasks.json into task name -> sorted physical episode ids."""
+    tasks_path = store_path / "tasks.json"
+    if not tasks_path.exists():
+        raise FileNotFoundError(
+            f"generative selection needs {tasks_path} (task label per episode); not found"
+        )
+    by_task: dict[str, list[int]] = defaultdict(list)
+    for episode, task in json.loads(tasks_path.read_text()).items():
+        by_task[str(task)].append(int(episode))
+    return {task: sorted(ids) for task, ids in by_task.items()}
+
+
+def _store_curation(store_path: Path) -> dict[str, dict[int, int]]:
+    """Read the store's optional curation.json: the success curation baked into
+    the store as per-task {unsuccessful_episode -> successful substitute}. It is
+    applied to a draw only where the unsuccessful episode is actually drawn, so
+    disjoint draws (base vs follow-up) never collide. Missing file -> no curation
+    (a manifest whose correct resolution depends on curation guards that with
+    expected_sha256, which then fails loudly rather than training on raw draws)."""
+    path = store_path / "curation.json"
     if not path.exists():
-        raise FileNotFoundError(f"selection manifest not found: {path}")
-    doc = OmegaConf.to_container(OmegaConf.load(path), resolve=True)
-    if not isinstance(doc, dict):
-        raise TypeError(f"selection manifest {path} must contain a mapping")
-    if doc.get("schema_version") != 1:
-        raise ValueError(
-            f"selection manifest {path} has unsupported schema_version "
-            f"{doc.get('schema_version')!r}"
-        )
+        return {}
+    raw = json.loads(path.read_text())
+    return {task: {int(o): int(n) for o, n in swaps.items()} for task, swaps in raw.items()}
 
-    parent = None
-    base_ids: list[int] = []
-    if doc.get("parent"):
-        parent_path = Path(doc["parent"])
-        if not parent_path.suffix:
-            parent_path = parent_path.with_suffix(path.suffix)
-        if not parent_path.is_absolute():
-            parent_path = path.parent / parent_path
-        parent = _load_selection_manifest(parent_path, (*seen, path))
-        base_ids = list(parent["episode_ids"])
 
-    if "episode_ids" in doc and ("add_episode_ids" in doc or parent is not None):
-        raise ValueError(
-            f"selection manifest {path} must use either episode_ids or parent/add_episode_ids"
-        )
-    if "episode_ids" in doc:
-        episode_ids = list(doc["episode_ids"])
+def _load_store_meta(
+    store_path: Path, cache: dict[str, tuple[dict, dict]]
+) -> tuple[dict[str, list[int]], dict[str, dict[int, int]]]:
+    """(task_episodes, curation) for a store, read once per resolve() even across
+    a parent chain, and validated: every curation source/target must be a real
+    episode of its own task (the cross-task/typo guard the old generator had)."""
+    key = str(store_path)
+    if key in cache:
+        return cache[key]
+    task_episodes = _store_task_episodes(store_path)
+    curation = _store_curation(store_path)
+    for task, swaps in curation.items():
+        if task not in task_episodes:
+            raise ValueError(f"{store_path}/curation.json references unknown task {task!r}")
+        pool = set(task_episodes[task])
+        for old, new in swaps.items():
+            if old not in pool:
+                raise ValueError(
+                    f"{store_path}/curation.json source {old} is not an episode of "
+                    f"task {task!r} (stale or mistyped)"
+                )
+            if new not in pool:
+                raise ValueError(
+                    f"{store_path}/curation.json target {new} is not an episode of "
+                    f"task {task!r} (a substitute must stay in-task)"
+                )
+    cache[key] = (task_episodes, curation)
+    return cache[key]
+
+
+def _episode_ids_sha256(episode_ids: list[int]) -> str:
+    return hashlib.sha256(json.dumps(episode_ids).encode()).hexdigest()
+
+
+def _seeded_choice(episodes: list[int], count: int, seed: int) -> list[int]:
+    """`count` episodes drawn without replacement from `episodes`, seeded and
+    sorted. count >= len keeps them all. The RNG contract (np.random.default_rng
+    + choice/replace=False) is fixed: it defines every checked-in selection."""
+    values = np.asarray(episodes)
+    if count >= len(values):
+        return sorted(values.tolist())
+    return sorted(np.random.default_rng(seed).choice(values, size=count, replace=False).tolist())
+
+
+def _seeded_continuation(episodes: list[int], used: set[int], count: int, seed: int) -> list[int]:
+    """Next `count` episodes for the same task, disjoint from `used` (the raw
+    draws of prior selections) -- this is "two selections for one task = sampling
+    without replacement". Uses permutation of the remainder so it is stable
+    regardless of how many were taken before."""
+    remaining = np.asarray([e for e in episodes if e not in used])
+    if count >= len(remaining):
+        return sorted(remaining.tolist())
+    return sorted(np.random.default_rng(seed).permutation(remaining)[:count].tolist())
+
+
+def _first_n(episodes: list[int], used: set[int], count: int) -> list[int]:
+    """First `count` episodes by ascending id, skipping any already drawn by a
+    prior same-task rule. Deterministic and *stable under store growth*: new
+    episodes are appended to the store with higher ids, so they land at the end
+    of the sorted pool and never displace the first `count`. `episodes` arrives
+    sorted from _store_task_episodes."""
+    return [e for e in episodes if e not in used][:count]
+
+
+def _apply_curation(draw: list[int], swaps: dict[int, int]) -> list[int]:
+    """Substitute unsuccessful episodes present in this draw with their
+    successful replacements."""
+    result = set(draw)
+    for old, new in swaps.items():
+        if old not in result:
+            continue  # this swap belongs to a different (disjoint) draw
+        if new in result:
+            raise ValueError(f"curation target {new} already present in the draw")
+        result.discard(old)
+        result.add(new)
+    return sorted(result)
+
+
+def _resolve_selection(selection: dict, store_path: Path | None, name: str = "selection") -> list[int]:
+    """Resolve an inline selection block (from a data config's `selection:` key)
+    to its episode ids.
+
+    Generative form -- {method?, seed?, select: [{task, count}, ...]} -- draws
+    `count` episodes per rule from the store's tasks.json. Two methods:
+
+      method: random (default) -- seeded uniform draw (np.random.default_rng +
+        choice/replace=False). Reproducible for a fixed store but NOT stable
+        under store growth: adding episodes to a task changes the pool size, so
+        the same seed selects a different subset. Needs `seed`.
+      method: first_n -- the first `count` episodes by ascending id. Stable
+        under store growth (new episodes get higher ids and append past the
+        first `count`). Deterministic, so it takes no `seed`.
+
+    Listing the same task more than once continues without replacement, so a
+    follow-up split is just the baseline rules plus one extra same-task rule (no
+    cross-file parent needed). Success curation (store curation.json) is applied
+    per draw. Explicit form -- {episode_ids: [...]} -- is the escape hatch for an
+    externally-curated set no rule can regenerate. Optional `count` and
+    `expected_sha256` pin the resolved set."""
+    if not isinstance(selection, dict):
+        raise TypeError(f"{name}: selection must be a mapping, got {type(selection).__name__}")
+
+    if "episode_ids" in selection:
+        if "select" in selection or "seed" in selection:
+            raise ValueError(f"{name}: use either episode_ids or seed/select, not both")
+        # An explicit set is "exactly these episodes, in this order"; preserve
+        # order but require uniqueness up front (a repeated id is an authoring
+        # mistake, and the EpisodeView would reject it anyway).
+        episode_ids = [int(e) for e in selection["episode_ids"]]
     else:
-        episode_ids = base_ids + list(doc.get("add_episode_ids", []))
-    if doc.get("ordering", "preserve") == "sorted":
-        episode_ids = sorted(episode_ids)
-    elif doc.get("ordering", "preserve") != "preserve":
-        raise ValueError(f"selection manifest {path} has unknown ordering")
-    if doc.get("count") is not None and int(doc["count"]) != len(episode_ids):
-        raise ValueError(
-            f"selection manifest {path} declares count={doc['count']} but resolves "
-            f"to {len(episode_ids)} episodes"
-        )
+        if "select" not in selection:
+            raise ValueError(f"{name}: generative selection needs a 'select' list")
+        method = selection.get("method", "random")
+        if method not in ("random", "first_n"):
+            raise ValueError(f"{name}: unknown selection method {method!r} (random | first_n)")
+        if method == "random" and "seed" not in selection:
+            raise ValueError(f"{name}: method=random needs a 'seed'")
+        if method == "first_n" and "seed" in selection:
+            raise ValueError(f"{name}: method=first_n is deterministic and takes no 'seed'")
+        if store_path is None:
+            raise ValueError(
+                f"{name}: generative selection needs the source store_path "
+                "(for tasks.json/curation.json) but none was provided"
+            )
+        seed = int(selection["seed"]) if method == "random" else 0
+        task_episodes, curation = _load_store_meta(store_path, {})
+        raw_used: dict[str, set[int]] = defaultdict(set)
+        ids: list[int] = []
+        for rule in selection["select"]:
+            task, count = rule["task"], int(rule["count"])
+            if task not in task_episodes:
+                raise ValueError(f"{name}: unknown task {task!r}")
+            pool = task_episodes[task]
+            # A repeated task continues without replacement (skips prior draws).
+            if method == "first_n":
+                raw = _first_n(pool, raw_used[task], count)
+            elif raw_used[task]:
+                raw = _seeded_continuation(pool, raw_used[task], count, seed)
+            else:
+                raw = _seeded_choice(pool, count, seed)
+            raw_used[task] |= set(raw)
+            ids += _apply_curation(raw, curation.get(task, {}))
+        episode_ids = sorted(ids)
 
-    resolved = {
-        "schema_version": 1,
-        "name": doc.get("name", path.stem),
-        "source": doc.get("source", {}),
-        "provenance": doc.get("provenance", {}),
-        "episode_ids": episode_ids,
-        "parent_fingerprint": parent["fingerprint"] if parent else None,
-        "raw": doc,
-    }
-    resolved["fingerprint"] = _hash_document(resolved)
-    return resolved
+    # Runtime episode-uniqueness guard: every resolved selection must map to
+    # distinct physical episodes. Duplicates would double-weight an episode's
+    # frames in training. Generative draws are disjoint by construction, but a
+    # curation substitute that a later same-task continuation happened to redraw
+    # would slip through -- catch it here rather than silently double-counting
+    # (or leaving a count/sha mismatch to explain).
+    if len(episode_ids) != len(set(episode_ids)):
+        counts = Counter(episode_ids)
+        dupes = sorted(e for e, c in counts.items() if c > 1)
+        raise ValueError(f"{name}: resolved selection has duplicate episodes {dupes}")
+
+    if selection.get("count") is not None and int(selection["count"]) != len(episode_ids):
+        raise ValueError(
+            f"{name}: declares count={selection['count']} but resolves to "
+            f"{len(episode_ids)} episodes"
+        )
+    # Audit lock: pin the exact resolved set. Catches a resolution that silently
+    # drifted -- a missing/edited store curation.json, a numpy RNG stream change
+    # across versions (NEP 19), or an edited seed/count -- rather than training on
+    # a different dataset than every prior run. Update it deliberately. It is
+    # optional: you cannot know it when authoring a config (it takes resolving
+    # the recipe against the store), so it is a create-then-pin step -- resolve
+    # unlocked first, then paste the hash (see `python scripts/pin_selection.py`).
+    expected = selection.get("expected_sha256")
+    actual = _episode_ids_sha256(episode_ids)
+    if expected is None:
+        # Unlocked is the default. Keep this at debug so it doesn't nag every
+        # run; `python scripts/pin_selection.py` prints the hash when you want it.
+        log.debug(
+            "[selection] %s resolved %d episodes, unlocked (sha256 %s)",
+            name, len(episode_ids), actual,
+        )
+    elif expected != actual:
+        raise ValueError(
+            f"{name}: resolved to episode ids sha256 {actual}, not the declared "
+            f"expected_sha256 {expected}. The resolved set changed (missing/edited "
+            "store curation.json, a numpy RNG version change, or an edited "
+            "seed/count). Re-pin with `python scripts/pin_selection.py` only if this "
+            "change is intended."
+        )
+    return episode_ids
 
 
 def resolve_source_config(source_cfg) -> dict:
-    """Resolve Hydra input and replace selection_path with immutable contents."""
+    """Resolve Hydra input, replacing the inline `selection:` block with the
+    resolved episode ids. Only the resolved ids enter `source` (and thus the
+    conversion-cache and checkpoint fingerprints) -- the selection's authoring
+    form (seed, per-task counts, notes) is deliberately not hashed, so editing a
+    comment without changing which episodes it resolves to reuses the cache."""
     source = _to_plain(source_cfg)
-    selection_path = source.pop("selection_path", None)
-    if selection_path is not None and source.get("episode_ids") is not None:
-        raise ValueError("data config cannot set both selection_path and episode_ids")
-    if selection_path is not None:
-        selection = _load_selection_manifest(Path(selection_path))
-        expected_source = selection.get("source", {}).get("dataset_id")
-        actual_source = source.get("dataset_id")
-        if expected_source and actual_source and expected_source != actual_source:
-            raise ValueError(
-                f"selection expects dataset_id={expected_source!r}, data config "
-                f"declares {actual_source!r}"
-            )
-        source["episode_ids"] = selection["episode_ids"]
-        source["selection_manifest"] = selection
+    selection = source.pop("selection", None)
+    if selection is not None and source.get("episode_ids") is not None:
+        raise ValueError("data config cannot set both selection and episode_ids")
+    if selection is not None:
+        store_path = source.get("store_path")
+        source["episode_ids"] = _resolve_selection(
+            selection,
+            Path(store_path) if store_path else None,
+            name=str(source.get("name", "selection")),
+        )
     return source
 
 

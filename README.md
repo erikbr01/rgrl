@@ -31,9 +31,24 @@ current update without multiprocessing large image batches.
   shared_memory` placement; vectorized windowing and batch gathering with
   edge-replication + pad masks. Sampling is a pure function of seed, epoch,
   and absolute batch cursor in every mode.
-- **Selections** (`configs/selections/`): versioned logical episode manifests.
-  `robo_dataset.EpisodeView` reads selected episodes from the original store
-  without re-encoding or copying videos.
+- **Selections**: a data config's inline `selection:` block is a generative
+  `(task, count)` recipe resolved against the store's `tasks.json`, not a
+  hand-listed set of integer IDs. Two draw methods: `random` (default; a seeded
+  uniform draw — reproducible for a fixed store, but the subset changes if you
+  add data to a task) and `first_n` (the first `count` episodes by id — stable
+  under store growth, since new episodes get higher ids and append past the
+  first `count`). Listing the same task twice continues the same draw without
+  replacement (that's how the `set_table_plus*` follow-up splits add 60 disjoint
+  episodes), and the success curation (unsuccessful→successful episode swaps) is
+  baked into the store's `curation.json`. An explicit `episode_ids` escape hatch
+  remains for externally-curated sets. An optional `expected_sha256` pins the
+  resolved set (a later silent change — edited `curation.json`, a numpy RNG
+  version bump, an edited seed/count — then errors instead of quietly training
+  on a different dataset); you don't hand-write it — author the recipe unlocked,
+  then `uv run python scripts/pin_selection.py data=<name>` prints the line to
+  paste. `robo_dataset.EpisodeView` reads the resolved episodes from the
+  original store without re-encoding or copying videos; only the resolved IDs
+  enter the conversion-cache identity.
 - **Normalization**: fitting (method, per-key stats) is
   `robo_dataset.normalization`'s job, done once at conversion time.
   `rgrl/normalize.py` wraps the fitted `KeyNormalizer`'s (scale, offset) as

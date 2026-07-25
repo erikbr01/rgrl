@@ -10,7 +10,19 @@ store_path: ${oc.env:RGRL_DATA_ROOT,/mnt/ssdB/erik}/droid_converted_v2_trimmed
 dataset_id: droid_v2_trimmed
 abs_action: false
 rename: {}
-selection_path: configs/selections/set_table_plusleft.json
+# Baseline (60 right + 60 middle) plus a seed-42 follow-up of 60 "left". The
+# repeated tasks are drawn in order; a task listed again continues the same
+# seeded draw without replacement (here "left" is new, so it's a fresh draw).
+selection:
+  seed: 42
+  select:
+    - task: "prepare plate - milk right"
+      count: 60
+    - task: "prepare plate - milk middle"
+      count: 60
+    - task: "prepare plate - milk left"
+      count: 60
+  count: 180
 shape_meta:
   obs:
     wrist_image_left:

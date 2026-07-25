@@ -213,43 +213,16 @@ def test_sample_weights_path_does_not_bust_cache(synthetic_store, tmp_path):
     assert manifest.stat().st_mtime_ns == mtime_before  # no reconversion triggered
 
 
-def test_selection_manifest_parent_additions_resolve_to_zero_copy_view(
-    synthetic_store, tmp_path
-):
-    selection_dir = tmp_path / "selections"
-    selection_dir.mkdir()
-    (selection_dir / "base.json").write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "name": "base",
-                "source": {"dataset_id": "synthetic"},
-                "ordering": "preserve",
-                "count": 1,
-                "episode_ids": [1],
-            }
-        )
-    )
-    child_path = selection_dir / "child.json"
-    child_path.write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "name": "child",
-                "source": {"dataset_id": "synthetic"},
-                "parent": "base.json",
-                "ordering": "preserve",
-                "count": 2,
-                "add_episode_ids": [0],
-            }
-        )
-    )
+def test_explicit_inline_selection_resolves_to_zero_copy_view(synthetic_store, tmp_path):
+    """An inline explicit-episode_ids selection (the escape hatch for externally
+    curated sets) resolves to exactly those episodes, in order, as a zero-copy
+    EpisodeView."""
     source_cfg = _zarr_store_source_cfg(synthetic_store)
     source_cfg["dataset_id"] = "synthetic"
-    source_cfg["selection_path"] = str(child_path)
+    source_cfg["selection"] = {"count": 2, "episode_ids": [1, 0]}
 
     store = load_store(source_cfg, source_cfg["shape_meta"], cache_root=tmp_path / "cache")
-    assert store.episode_ids == (1, 0)
+    assert store.episode_ids == (1, 0)  # caller order preserved
     assert store.meta.num_episodes == 2
     assert (store.path / "data").is_symlink()
 
@@ -261,6 +234,200 @@ def test_selection_manifest_parent_additions_resolve_to_zero_copy_view(
         store.load("state")[:first_length],
         source.get_frames(1, "state", 0, first_length),
     )
+
+
+def _write_generative_store(tmp_path):
+    """A directory with just the tasks.json (+curation.json) a generative
+    selection reads -- enough to unit-test resolution without a full store."""
+    store = tmp_path / "gen_store"
+    store.mkdir(parents=True, exist_ok=True)
+    # 6 'alpha' + 4 'beta' episodes, interleaved so a sorted pool != draw order.
+    tasks = {str(e): ("alpha" if e % 5 < 3 else "beta") for e in range(10)}
+    (store / "tasks.json").write_text(json.dumps(tasks))
+    return store
+
+
+_ALPHA = [e for e in range(10) if e % 5 < 3]
+
+
+def test_generative_selection_is_deterministic_and_reproducible(tmp_path):
+    from rgrl.data import _resolve_selection
+
+    store = _write_generative_store(tmp_path)
+    sel = {"seed": 7, "select": [{"task": "alpha", "count": 3}]}
+    first = _resolve_selection(sel, store)
+    second = _resolve_selection(sel, store)
+    assert first == second  # deterministic
+    assert len(first) == 3
+    assert set(first) <= set(_ALPHA)  # only alpha episodes
+
+
+def test_generative_seed_changes_the_draw(tmp_path):
+    from rgrl.data import _resolve_selection
+
+    store = _write_generative_store(tmp_path)
+
+    def draw(seed):
+        return _resolve_selection({"seed": seed, "select": [{"task": "alpha", "count": 2}]}, store)
+
+    assert draw(1) != draw(2)
+
+
+def test_repeated_task_continues_without_replacement(tmp_path):
+    """Listing a task twice in one select list continues the same seeded draw
+    without replacement -- the mechanism the plus* follow-up configs use."""
+    from rgrl.data import _resolve_selection
+
+    store = _write_generative_store(tmp_path)
+    once = _resolve_selection({"seed": 5, "select": [{"task": "alpha", "count": 3}]}, store)
+    twice = _resolve_selection(
+        {"seed": 5, "select": [{"task": "alpha", "count": 3}, {"task": "alpha", "count": 3}]},
+        store,
+    )
+    assert set(once) <= set(twice)  # the second draw is additive
+    assert set(twice) == set(_ALPHA)  # all 6 alpha episodes, no overlap
+    assert len(twice) == len(set(twice)) == 6
+
+
+def test_generative_curation_swaps_unsuccessful_episodes(tmp_path):
+    from rgrl.data import _resolve_selection
+
+    store = _write_generative_store(tmp_path)
+    sel = {"seed": 7, "select": [{"task": "alpha", "count": 3}]}
+    drawn = _resolve_selection(sel, store)
+    # Bake a curation swapping a drawn alpha episode for another alpha episode.
+    victim = drawn[0]
+    substitute = next(e for e in _ALPHA if e not in drawn)
+    (store / "curation.json").write_text(json.dumps({"alpha": {str(victim): substitute}}))
+    curated = _resolve_selection(sel, store)
+    assert victim not in curated
+    assert substitute in curated
+
+
+def test_generative_selection_validation_errors(tmp_path):
+    from rgrl.data import _resolve_selection
+
+    store = _write_generative_store(tmp_path)
+
+    with pytest.raises(ValueError, match="unknown task"):
+        _resolve_selection({"seed": 1, "select": [{"task": "nope", "count": 1}]}, store)
+    with pytest.raises(ValueError, match="count"):
+        _resolve_selection(
+            {"seed": 1, "count": 99, "select": [{"task": "alpha", "count": 2}]}, store
+        )
+    with pytest.raises(ValueError, match="store_path"):
+        _resolve_selection({"seed": 1, "select": [{"task": "alpha", "count": 1}]}, None)
+    with pytest.raises(ValueError, match="either episode_ids or seed/select"):
+        _resolve_selection({"episode_ids": [0], "seed": 1, "select": []}, store)
+
+
+def test_first_n_is_stable_under_store_growth(tmp_path):
+    """method=first_n takes the first `count` episodes by id, so appending new
+    (higher-id) episodes to the store never changes the selection -- unlike the
+    seeded random draw, whose pool size changes."""
+    from rgrl.data import _resolve_selection
+
+    store = _write_generative_store(tmp_path)
+    sel = {"method": "first_n", "select": [{"task": "alpha", "count": 3}]}
+    before = _resolve_selection(sel, store)
+    assert before == [0, 1, 2]  # first three alpha ids
+
+    # Grow the store: two more 'alpha' episodes with higher ids.
+    tasks = json.loads((store / "tasks.json").read_text())
+    tasks["100"] = "alpha"
+    tasks["101"] = "alpha"
+    (store / "tasks.json").write_text(json.dumps(tasks))
+    assert _resolve_selection(sel, store) == before  # unchanged under growth
+
+    # Contrast: the seeded random draw is NOT stable across the same growth.
+    rnd = {"seed": 42, "select": [{"task": "alpha", "count": 3}]}
+    store2 = _write_generative_store(tmp_path / "b")
+    small = _resolve_selection(rnd, store2)
+    t = json.loads((store2 / "tasks.json").read_text())
+    t["100"] = "alpha"
+    t["101"] = "alpha"
+    (store2 / "tasks.json").write_text(json.dumps(t))
+    assert _resolve_selection(rnd, store2) != small
+
+
+def test_first_n_continuation_takes_the_next_n(tmp_path):
+    from rgrl.data import _resolve_selection
+
+    store = _write_generative_store(tmp_path)
+    ids = _resolve_selection(
+        {"method": "first_n", "select": [{"task": "alpha", "count": 3}, {"task": "alpha", "count": 2}]},
+        store,
+    )
+    # first 3 alpha = [0, 1, 2], next 2 = [5, 6]; disjoint, still first-by-id.
+    assert ids == [0, 1, 2, 5, 6]
+
+
+def test_resolved_selection_rejects_duplicate_episodes(tmp_path):
+    """The runtime uniqueness guard fires for any resolved selection with a
+    repeated episode (here via an explicit list); generative draws are disjoint
+    by construction, but the guard also catches a curation-substitute redraw."""
+    from rgrl.data import _resolve_selection
+
+    store = _write_generative_store(tmp_path)
+    with pytest.raises(ValueError, match="duplicate episodes"):
+        _resolve_selection({"episode_ids": [0, 1, 0]}, store)
+
+
+def test_selection_method_validation(tmp_path):
+    from rgrl.data import _resolve_selection
+
+    store = _write_generative_store(tmp_path)
+    with pytest.raises(ValueError, match="unknown selection method"):
+        _resolve_selection({"method": "nope", "seed": 1, "select": [{"task": "alpha", "count": 1}]}, store)
+    with pytest.raises(ValueError, match="method=random needs a 'seed'"):
+        _resolve_selection({"select": [{"task": "alpha", "count": 1}]}, store)
+    with pytest.raises(ValueError, match="takes no 'seed'"):
+        _resolve_selection(
+            {"method": "first_n", "seed": 1, "select": [{"task": "alpha", "count": 1}]}, store
+        )
+
+
+def test_selection_provenance_edits_do_not_change_resolved_ids(tmp_path):
+    """The resolved source (hence the conversion cache / resume fingerprint)
+    keys on episode ids only: editing free-text notes while keeping the same
+    (seed, select) must not change what resolves."""
+    from rgrl.data import _resolve_selection
+
+    store = _write_generative_store(tmp_path)
+    body = {"seed": 7, "select": [{"task": "alpha", "count": 3}]}
+    assert (
+        _resolve_selection(body, store)
+        == _resolve_selection({**body, "notes": "totally different text"}, store)
+    )
+
+
+def test_expected_sha256_audit_lock_catches_drift(tmp_path):
+    """The expected_sha256 lock turns a silently-changed resolution (missing
+    curation, numpy RNG drift, edited seed/count) into a hard error."""
+    from rgrl.data import _resolve_selection, _episode_ids_sha256
+
+    store = _write_generative_store(tmp_path)
+    body = {"seed": 7, "select": [{"task": "alpha", "count": 3}]}
+    good = _resolve_selection(body, store)
+    assert _resolve_selection({**body, "expected_sha256": _episode_ids_sha256(good)}, store) == good
+    with pytest.raises(ValueError, match="expected_sha256"):
+        _resolve_selection({**body, "expected_sha256": "deadbeef"}, store)
+
+
+def test_curation_must_reference_in_task_episodes(tmp_path):
+    from rgrl.data import _resolve_selection
+
+    store = _write_generative_store(tmp_path)
+    sel = {"seed": 7, "select": [{"task": "alpha", "count": 3}]}
+    beta_episode = next(e for e in range(10) if e % 5 >= 3)  # belongs to 'beta'
+    # Target crosses tasks (substitute must stay in-task).
+    (store / "curation.json").write_text(json.dumps({"alpha": {"0": beta_episode}}))
+    with pytest.raises(ValueError, match="stay in-task"):
+        _resolve_selection(sel, store)
+    # Source is not a real episode of the task (stale/mistyped).
+    (store / "curation.json").write_text(json.dumps({"alpha": {"999": 1}}))
+    with pytest.raises(ValueError, match="not an episode"):
+        _resolve_selection(sel, store)
 
 
 @pytest.fixture
@@ -374,6 +541,46 @@ def test_episode_ids_are_validated(video_store_path, tmp_path, episode_ids, mess
     source_cfg = _video_store_source_cfg(video_store_path, episode_ids=episode_ids)
     with pytest.raises((TypeError, ValueError), match=message):
         load_store(source_cfg, source_cfg["shape_meta"], cache_root=tmp_path / "cache")
+
+
+def test_generative_selection_builds_a_unique_episode_dataset(video_store_path, tmp_path):
+    """End-to-end episode uniqueness at construction time: a generative selection
+    -> load_store -> dataset windows. Every logical episode maps to a distinct
+    physical episode, no frame is reused (num_frames == sum of the selected
+    episodes' lengths), and no observation window straddles an episode boundary."""
+    from robo_dataset.store_factory import open_store
+    from rgrl.dataset import Windows, _split_bounds, _windows_index_table
+
+    # Tag the 4 source episodes (lengths 5, 4, 6, 3) with two tasks, then pick
+    # one per task plus a second 'A' -- a continuation, so uniqueness across the
+    # repeated task is exercised at build time, not just in resolution.
+    (Path(video_store_path) / "tasks.json").write_text(
+        json.dumps({"0": "A", "1": "A", "2": "B", "3": "B"})
+    )
+    source_cfg = _video_store_source_cfg(video_store_path)
+    source_cfg["selection"] = {
+        "method": "first_n",
+        "select": [
+            {"task": "A", "count": 1},
+            {"task": "B", "count": 1},
+            {"task": "A", "count": 1},  # continuation -> next 'A' by id
+        ],
+    }
+    store = load_store(source_cfg, source_cfg["shape_meta"], cache_root=tmp_path / "cache")
+
+    phys = list(store.episode_ids)
+    assert phys == [0, 1, 2]  # A:0, B:2, then next A:1 -- resorted logical order
+    assert len(phys) == len(set(phys)) == store.meta.num_episodes  # unique episodes
+
+    src = open_store(video_store_path)
+    # No frame reused: total frames == sum over the DISTINCT selected episodes.
+    assert store.meta.num_frames == sum(src.episode_length(i) for i in phys)
+
+    # No window crosses an episode boundary in the constructed dataset.
+    bounds = _split_bounds(store, 0, store.meta.num_episodes)
+    obs, _act, _pad = _windows_index_table(bounds, Windows(obs_horizon=2, horizon=4))
+    frame_ep = {f: ep for ep, (lo, hi) in enumerate(bounds.tolist()) for f in range(lo, hi)}
+    assert all(len({frame_ep[int(f)] for f in row}) == 1 for row in obs.numpy())
 
 
 def test_short_prefix_collision_detected_by_full_hash(tmp_path):

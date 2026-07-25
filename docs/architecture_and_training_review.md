@@ -23,8 +23,8 @@ The `robo_dataset` work is captured in local submodule commit `64bb0a5`
 | Validation | Validation uses an isolated fixed RNG stream, pools a true element-weighted mean (accumulating the squared-error sum and valid-element count, so the variable prefix denominator and a short final batch are weighted correctly), validates split sizes, and does not change subsequent training updates. |
 | Recipe semantics | Training length, warmup, logging, validation, and checkpoint cadence are all expressed in optimizer steps (a sample-budget front-end was tried and dropped as redundant; `batch_size` sets data-per-step). The big-batch recipe uses 1/4 the steps of the bs=256 default so both see the same data. |
 | Sampling | Uniform/weighted sampling is a separate Hydra group. Resident and shared-memory modes use the same deterministic epoch order and resume from the exact next batch. |
-| Episode subsets | DROID subset IDs moved into versioned manifests with parent/addition composition and executable provenance checks. `EpisodeView` maps logical episodes to the original physical store without copying or re-encoding videos. |
-| Conversion cache | Cache identity uses an explicit schema, source metadata fingerprint, resolved selection contents, and target schema. Per-key locks, temporary siblings, validation, directory fsync, and atomic publish prevent partial caches. |
+| Episode subsets | DROID subsets are generative `(task, seed, count)` manifests resolved against the store's `tasks.json` (not hand-listed IDs); same-task selections continue one seeded draw without replacement, and success curation lives in the store's `curation.json`. An explicit-`episode_ids` escape hatch covers externally-curated sets. `EpisodeView` maps the resolved logical episodes to the original physical store without copying or re-encoding videos. |
+| Conversion cache | Cache identity uses an explicit schema, source metadata fingerprint, the resolved episode IDs (not the manifest's authoring form, so editing provenance reuses the cache), and target schema. Per-key locks, temporary siblings, validation, directory fsync, and atomic publish prevent partial caches. |
 | Data placement | `auto`, `cuda_resident`, and `shared_memory` modes are explicit. Auto placement considers current free VRAM, data bytes, estimated model/optimizer/EMA state, and a configured reserve, then logs its decision. |
 | CPU/shared-memory path | Window tables and batch gathers are vectorized. PyTorch's batched `__getitems__` avoids per-sample dictionaries/default collation. A producer thread overlaps the next pinned host gather with side-stream H2D, with allocator-safe recursive `record_stream`. |
 | Policy boundary | The trainer calls `policy.loss(raw_batch)`. Policies own image preprocessing for both training and inference, so preprocessing is included in the compiled loss boundary. |
@@ -62,9 +62,10 @@ completed against all 45,879 logical frames.
 Logical subset cache creation was also tested against the actual DROID source:
 the 120-episode baseline resolved to 45,879 frames and the 180-episode
 plus-left view to 70,128 frames. Each new cache contains about 24 KB of
-metadata/symlinks, rather than copied encoded media. The checked-in generator
-reproduces every set-table manifest exactly from source `tasks.json` using
-seed 42 and the declared success replacements.
+metadata/symlinks, rather than copied encoded media. `rgrl.data` resolves the
+generative manifests directly: every set-table selection reproduces its exact
+episode set from source `tasks.json` using seed 42 and the store's
+`curation.json` success swaps (regression-tested in `tests/test_data.py`).
 
 ### End-to-end Robosuite integration
 
@@ -499,46 +500,44 @@ does not require the selected episodes to be physically rewritten. For a
 GPU-resident load, selected episodes can be concatenated once in memory. For
 the CPU/streaming path, reads remain against the original store.
 
-### Versioned selection manifests
+### Generative selections (implemented)
 
-Move the long lists from `configs/data/*.yaml` into a small manifest namespace,
-for example:
+The long integer lists — and the separate `configs/selections/*.json` files —
+are gone. A data config carries an inline `selection:` block, a generative
+recipe `rgrl/data.py` resolves at load time against the store's `tasks.json`:
 
 ```yaml
-schema_version: 1
-name: set_table_plusleft
-source:
-  dataset_id: droid_converted_v2_trimmed
-  fingerprint: sha256:...
+# configs/data/set_table_plusright.yaml
 selection:
-  parent: set_table_baseline
-  add_episode_ids: [...]
-provenance:
-  generator: tools/generate_set_table_selection.py
   seed: 42
-  predicates:
-    success: true
-    task: prepare plate - milk left
-counts:
-  total: 180
-  by_task: {...}
-split:
-  train_episode_ids: [...]
-  val_episode_ids: [...]
+  select:
+    - {task: "prepare plate - milk right",  count: 60}
+    - {task: "prepare plate - milk middle", count: 60}
+    - {task: "prepare plate - milk right",  count: 60}   # +60 more, continued
+  count: 180
+  # expected_sha256: "..."   # optional lock; unlocked by default
 ```
 
-Hydra data configs then say only:
-
-```yaml
-source: droid_v2_trimmed
-selection: set_table_plusleft
-```
-
-Keep the generator in this repository rather than referring to an external
-`policy_graphs` script. Validate the manifest against the source fingerprint
-and test the intended algebra: baseline inclusion, exactly 60 additions, and
-disjoint follow-up additions. The current lists pass those checks; the goal is
-to make that property executable rather than documentary.
+Two draw methods: `random` (default, seeded uniform — reproducible for a fixed
+store but the subset changes when a task gains episodes) and `first_n` (the
+first `count` by id — **stable under store growth**, since new episodes append
+with higher ids past the first `count`; deterministic, so no seed). Fixed-count
+random selection is inherently not growth-stable — the pool size changes, so the
+seed lands elsewhere — which is why `first_n` exists for datasets meant to grow.
+Rules are drawn in order, and **listing a task again continues without
+replacement** — so a follow-up split is just the baseline rules plus one extra
+same-task rule, fully self-contained (no cross-file parent). The success curation (unsuccessful→successful episode swaps)
+is baked into the store's `curation.json`, validated to stay in-task. An
+explicit-`episode_ids` escape hatch remains for externally-curated sets with no
+regenerable rule (none of the current configs need it). `count` is a
+human-readable check; `expected_sha256` is an **optional** audit lock over the
+resolved set (unlocked by default) — when set it turns a silently changed
+resolution (missing curation, numpy RNG drift, edited seed/count) into a hard
+error. You can't hand-write it (it needs resolving the recipe against the
+store), so `python scripts/pin_selection.py data=<name>` prints the line to paste.
+The intended algebra (baseline inclusion, exactly 60 additions,
+disjoint follow-ups, exact reproduction of the historical sets) is executable in
+`tests/test_data.py` rather than documentary.
 
 ### Separate selection from sampling
 

@@ -6,7 +6,18 @@ rename: {}
 # Fixed, reproducible 120-episode logical view: 60 prepare-tray-top and
 # 60 prepare-tray-bottom episodes. The versioned manifest owns IDs and
 # provenance; cache creation links this physical store without re-encoding.
-selection_path: configs/selections/prepare_tray_baseline.json
+# Generative selection resolved against the store's tasks.json: a seed-42 draw
+# of 60 "top" + 60 "bottom" (diffusion_policy's original episodes_per_task draw
+# used the same default_rng(42).choice contract, so this reproduces it exactly).
+# No success curation for this dataset.
+selection:
+  seed: 42
+  select:
+    - task: "prepare tray - top"
+      count: 60
+    - task: "prepare tray - bottom"
+      count: 60
+  count: 120
 shape_meta:
   obs:
     wrist_image_left:
