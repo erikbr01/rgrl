@@ -1,0 +1,15 @@
+# MimicGen three_piece_assembly_d0 (1000 demos, robosuite 1.4.1 native, state-based).
+# NO env_meta override: the hdf5's native env_args (OSC_POSE, env_version 1.4.1)
+# match the mimicgen conda eval env's robosuite 1.4.1 exactly. Delta actions [7].
+name: mimicgen_three_piece_lowdim
+path: /mnt/ssdB/erik/policy_graphs/data/source/mimicgen/core/three_piece_assembly_d0.hdf5
+abs_action: false
+rename: {}
+shape_meta:
+  obs:
+    object: {shape: [42], type: low_dim}
+    robot0_eef_pos: {shape: [3], type: low_dim}
+    robot0_eef_quat: {shape: [4], type: low_dim, quat_convention: xyzw}
+    robot0_gripper_qpos: {shape: [2], type: low_dim}
+  action:
+    shape: [7]

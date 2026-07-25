@@ -4,8 +4,8 @@ version = "0.1.0"
 description = "Really good robot learning: minimal, blazing-fast imitation learning."
 requires-python = ">=3.11"
 dependencies = [
-    "torch>=2.7",
-    "torchvision>=0.22",
+    "torch>=2.13",
+    "torchvision>=0.28",
     "numpy>=1.26",
     "h5py>=3.10",
     "tyro>=0.9",
@@ -17,11 +17,13 @@ dependencies = [
 [project.optional-dependencies]
 wandb = ["wandb>=0.17"]
 eval = [
-    "robomimic==0.3.0",
-    "robosuite==1.4.1",
-    # robosuite 1.4.1's OSC controller breaks against mujoco >= 3 (mj_fullM
-    # signature change); 2.3.7 is the newest compatible release
-    "mujoco==2.3.7",
+    # robomimic 0.5.0 (robosuite 1.5 support) is git-only, not on PyPI — pinned
+    # via [tool.uv.sources] below to the exact commit the v15 data was validated on.
+    "robomimic",
+    "robosuite==1.5.1",
+    # robosuite 1.5.1 requires mujoco 3.x; 3.9.0 matches the stack the v15
+    # (env_version 1.5.1) datasets were generated/validated with.
+    "mujoco==3.9.0",
     "imageio[ffmpeg]>=2.34",
     # policy-server client: rgrl/inference/policy_client.py's HttpPolicy.
     # Deliberately not torch/fastapi — an env-only box never needs the
@@ -50,17 +52,20 @@ packages = ["rgrl"]
 # robosuite 1.4.1 (needed for robomimic v0.3-era datasets) has old metadata.
 # Keep the core env resolvable without the eval extra.
 
-# cu128 wheels: this machine has an RTX 5090 (Blackwell, sm_120), which cu126
-# doesn't ship kernels for. cu128 is the oldest CUDA 12.x index with Blackwell
-# support and runs fine under this machine's 580 driver.
+# cu126 wheels: the newest torch (2.13+) is published on the cu126 index and
+# runs fine on this machine's driver + GPU; the cu128 index lags (tops out at
+# torch 2.11), so cu126 is actually the newer torch. Keep training on cu126.
 [tool.uv.sources]
-torch = [{ index = "pytorch-cu128" }]
-torchvision = [{ index = "pytorch-cu128" }]
+torch = [{ index = "pytorch-cu126" }]
+torchvision = [{ index = "pytorch-cu126" }]
 # vendored as a git submodule (third_party/robo_dataset), not copied in — stays
 # a standalone repo at github.com:erikbr01/robo_dataset
 robo_dataset = { path = "third_party/robo_dataset", editable = true }
+# robomimic 0.5.0 is not published to PyPI; use the ARISE-Initiative git commit
+# that ships robosuite-1.5 support (matches the OGPO/v15 stack).
+robomimic = { git = "https://github.com/ARISE-Initiative/robomimic.git", rev = "e10526b9a40c78b41f1e37e60041dc0ec0a5f60f" }
 
 [[tool.uv.index]]
-name = "pytorch-cu128"
-url = "https://download.pytorch.org/whl/cu128"
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
 explicit = true

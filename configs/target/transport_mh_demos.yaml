@@ -1,0 +1,28 @@
+# Matches configs/data/transport_mh_demos.yaml exactly (no conversion): raw
+# low_dim_v15 delta actions [14], native two-arm OSC_POSE delta control.
+obs:
+  object:
+    shape: [41]
+    type: low_dim
+  robot0_eef_pos:
+    shape: [3]
+    type: low_dim
+  robot0_eef_quat:
+    shape: [4]
+    type: low_dim
+    quat_convention: xyzw
+  robot0_gripper_qpos:
+    shape: [2]
+    type: low_dim
+  robot1_eef_pos:
+    shape: [3]
+    type: low_dim
+  robot1_eef_quat:
+    shape: [4]
+    type: low_dim
+    quat_convention: xyzw
+  robot1_gripper_qpos:
+    shape: [2]
+    type: low_dim
+action:
+  shape: [14]

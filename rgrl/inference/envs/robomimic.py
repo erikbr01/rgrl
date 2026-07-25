@@ -45,6 +45,13 @@ def _worker(conn, env_meta: dict, image_keys: list[str], state_keys: list[str], 
 
     from rgrl.inference.action_transforms import undo_abs_rotation_action
 
+    # Register extra env packages (e.g. MimicGen tasks like ThreePieceAssembly_D0)
+    # so robosuite.make() finds them in THIS worker process. RGRL_EVAL_IMPORTS is a
+    # comma-separated list the eval launcher sets for the matched backend; unset
+    # (e.g. plain robomimic v15 eval) is a no-op.
+    for _pkg in filter(None, os.environ.get("RGRL_EVAL_IMPORTS", "").split(",")):
+        __import__(_pkg.strip())
+
     ObsUtils.initialize_obs_utils_with_obs_specs(
         {"obs": {"low_dim": state_keys, "rgb": image_keys}}
     )

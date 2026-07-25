@@ -1,0 +1,37 @@
+# transport-mh HUMAN DEMONSTRATIONS (the actual training data), path-kind.
+# low_dim_v15 (env_version 1.5.1) now MATCHES the env stack (robosuite 1.5.1 /
+# robomimic 0.5.0 / mujoco 3.9). No env_meta override: rgrl reads the hdf5's
+# native v15 env_args (nested BASIC composite controller) directly -- the
+# robosuite-1.4.1 flat-OSC override this used to carry is no longer needed.
+# Vanilla delta actions [14] (2 arms x 7); matching target transport_mh_demos.
+name: transport_mh_demos_lowdim
+path: /mnt/ssdB/erik/cupid_data/robomimic/datasets/transport/mh/transport_mh_noisy_v15.hdf5
+abs_action: false
+rename: {}
+shape_meta:
+  obs:
+    object:
+      shape: [41]
+      type: low_dim
+    robot0_eef_pos:
+      shape: [3]
+      type: low_dim
+    robot0_eef_quat:
+      shape: [4]
+      type: low_dim
+      quat_convention: xyzw
+    robot0_gripper_qpos:
+      shape: [2]
+      type: low_dim
+    robot1_eef_pos:
+      shape: [3]
+      type: low_dim
+    robot1_eef_quat:
+      shape: [4]
+      type: low_dim
+      quat_convention: xyzw
+    robot1_gripper_qpos:
+      shape: [2]
+      type: low_dim
+  action:
+    shape: [14]
