@@ -1,15 +1,17 @@
 # DROID DiT flow recipe (set_table / prepare_tray baselines).
 #
-# Small batch because the observations are large multi-camera images; the data
-# path is auto (CPU/shared-host gathers with pinned H2D on a side stream) with
-# a single producer thread -- workers=0 beats multiprocessing large image
-# batches (IPC/contention). 300k optimizer steps is the baseline budget over
-# 120 episodes; save a checkpoint every 100k.
+# batch_size 256 (the repo default, with the default lr 1e-4): it fits now that
+# the baselines train on two cameras (wrist_image_left + exterior) instead of
+# three, freeing the per-camera encoder activations the third stream consumed.
+# The data path is auto (CPU/shared-host gathers with pinned H2D on a side
+# stream) with a single producer thread -- workers=0 beats multiprocessing
+# large image batches (IPC/contention). 300k optimizer steps is the baseline
+# budget; save a checkpoint every 100k.
 defaults:
   - default
   - _self_
 
-batch_size: 64
+batch_size: 256
 data_mode: auto
 dataloader_workers: 0
 steps: 300000
