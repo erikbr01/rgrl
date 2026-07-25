@@ -45,7 +45,7 @@ current update without multiprocessing large image batches.
   resolved set (a later silent change — edited `curation.json`, a numpy RNG
   version bump, an edited seed/count — then errors instead of quietly training
   on a different dataset); you don't hand-write it — author the recipe unlocked,
-  then `uv run python -m rgrl.pin_selection data=<name>` prints the line to
+  then `uv run python scripts/pin_selection.py data=<name>` prints the line to
   paste. `robo_dataset.EpisodeView` reads the resolved episodes from the
   original store without re-encoding or copying videos; only the resolved IDs
   enter the conversion-cache identity.

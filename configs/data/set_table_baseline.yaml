@@ -12,7 +12,7 @@ rename: {}
 # Generative selection resolved against the store's tasks.json: a seed-42 draw
 # of 60 "right" + 60 "middle". Success curation (unsuccessful->successful swaps)
 # lives in the store's curation.json. Unlocked; add expected_sha256 (via
-# `python -m rgrl.pin_selection`) to pin the resolved set against silent drift.
+# `python scripts/pin_selection.py`) to pin the resolved set against silent drift.
 selection:
   seed: 42
   select:

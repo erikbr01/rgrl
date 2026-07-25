@@ -243,12 +243,12 @@ def _resolve_selection(selection: dict, store_path: Path | None, name: str = "se
     # a different dataset than every prior run. Update it deliberately. It is
     # optional: you cannot know it when authoring a config (it takes resolving
     # the recipe against the store), so it is a create-then-pin step -- resolve
-    # unlocked first, then paste the hash (see `python -m rgrl.pin_selection`).
+    # unlocked first, then paste the hash (see `python scripts/pin_selection.py`).
     expected = selection.get("expected_sha256")
     actual = _episode_ids_sha256(episode_ids)
     if expected is None:
         # Unlocked is the default. Keep this at debug so it doesn't nag every
-        # run; `python -m rgrl.pin_selection` prints the hash when you want it.
+        # run; `python scripts/pin_selection.py` prints the hash when you want it.
         log.debug(
             "[selection] %s resolved %d episodes, unlocked (sha256 %s)",
             name, len(episode_ids), actual,
@@ -258,7 +258,7 @@ def _resolve_selection(selection: dict, store_path: Path | None, name: str = "se
             f"{name}: resolved to episode ids sha256 {actual}, not the declared "
             f"expected_sha256 {expected}. The resolved set changed (missing/edited "
             "store curation.json, a numpy RNG version change, or an edited "
-            "seed/count). Re-pin with `python -m rgrl.pin_selection` only if this "
+            "seed/count). Re-pin with `python scripts/pin_selection.py` only if this "
             "change is intended."
         )
     return episode_ids

@@ -534,7 +534,7 @@ human-readable check; `expected_sha256` is an **optional** audit lock over the
 resolved set (unlocked by default) — when set it turns a silently changed
 resolution (missing curation, numpy RNG drift, edited seed/count) into a hard
 error. You can't hand-write it (it needs resolving the recipe against the
-store), so `python -m rgrl.pin_selection data=<name>` prints the line to paste.
+store), so `python scripts/pin_selection.py data=<name>` prints the line to paste.
 The intended algebra (baseline inclusion, exactly 60 additions,
 disjoint follow-ups, exact reproduction of the historical sets) is executable in
 `tests/test_data.py` rather than documentary.

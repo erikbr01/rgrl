@@ -13,7 +13,7 @@ Pinning is optional but recommended: it turns a later silent change of the
 resolved set (a store's ``curation.json`` edited, a numpy RNG version bump, an
 edited seed/count) into a hard error instead of a quietly different dataset.
 
-    uv run python -m rgrl.pin_selection data=set_table_baseline
+    uv run python scripts/pin_selection.py data=set_table_baseline
 """
 
 from __future__ import annotations
