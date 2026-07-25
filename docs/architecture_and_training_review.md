@@ -188,9 +188,12 @@ CUDA_VISIBLE_DEVICES=0 uv run python train.py \
   training.profile=false training.resume=never out=/tmp/toolhang_flow_bs1024
 ```
 
-For DROID, `scripts/train_droid_flow.sh` owns the production-shaped recipe.
-Set `DROID_SHARE_IMAGE_ENCODER=true` only for the explicitly opt-in shared
-backbone ablation.
+For DROID, the production-shaped recipe lives entirely in yaml: a
+`configs/experiment/*.yaml` selects the data/target/policy/training groups,
+image crop, wandb, and out; `scripts/train_droid_flow.sh EXPERIMENT` just adds
+the uv extras and repo cwd. Append hydra overrides for one-offs, e.g.
+`policy.share_image_encoder=true` for the explicitly opt-in shared-backbone
+ablation, or `training.batch_size=32`.
 
 ## Pre-implementation executive summary
 

@@ -69,6 +69,9 @@ current update without multiprocessing large image batches.
   `data` (which store), `policy` (architecture + training-time schedule),
   `sampling` (uniform/weighted), `training` (optimizer/performance),
   `inference` (deployment overrides), and environment/target schemas.
+  `experiment/*` presets (`+experiment=set_table_baseline`) compose a full
+  run — data/target/policy/training + wandb + out — in one file, so a launch
+  is `train.py +experiment=<name>` with no magic-number CLI args.
 - **Outputs**: every run gets a self-contained directory with resolved config,
   immutable step checkpoints, an atomic relative `latest.pt` symlink, and
   logs/evaluations.
