@@ -1,12 +1,8 @@
-# Matches configs/data/set_table_baseline.yaml's source shape_meta --
-# all three DROID cameras (the store is being rebuilt from raw SVOs to add
-# wrist_image_right; see configs/data/set_table_baseline.yaml).
+# Matches configs/data/set_table_baseline.yaml's shape_meta -- a single wrist
+# camera (wrist_image_left) + the exterior view. The physical store also holds
+# wrist_image_right, but the baseline does not train on it.
 obs:
   wrist_image_left:
-    shape: [180, 320, 3]
-    type: rgb
-    channel_order: rgb
-  wrist_image_right:
     shape: [180, 320, 3]
     type: rgb
     channel_order: rgb
