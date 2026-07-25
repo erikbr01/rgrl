@@ -18,7 +18,6 @@ selection:
     - task: "prepare tray - bottom"
       count: 60
   count: 120
-  expected_sha256: "bc258f87a9a2798581d2e12cc8a703dacdfc174bf5696674ad15faeeb7258673"
 shape_meta:
   obs:
     wrist_image_left:

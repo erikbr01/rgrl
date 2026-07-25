@@ -515,7 +515,7 @@ selection:
     - {task: "prepare plate - milk middle", count: 60}
     - {task: "prepare plate - milk right",  count: 60}   # +60 more, continued
   count: 180
-  expected_sha256: "..."
+  # expected_sha256: "..."   # optional lock; unlocked by default
 ```
 
 Two draw methods: `random` (default, seeded uniform — reproducible for a fixed
@@ -530,10 +530,12 @@ same-task rule, fully self-contained (no cross-file parent). The success curatio
 is baked into the store's `curation.json`, validated to stay in-task. An
 explicit-`episode_ids` escape hatch remains for externally-curated sets with no
 regenerable rule (none of the current configs need it). `count` is a
-human-readable check and
-`expected_sha256` is an audit lock over the resolved set — it turns a silently
-changed resolution (missing curation, numpy RNG drift, edited seed/count) into a
-hard error. The intended algebra (baseline inclusion, exactly 60 additions,
+human-readable check; `expected_sha256` is an **optional** audit lock over the
+resolved set (unlocked by default) — when set it turns a silently changed
+resolution (missing curation, numpy RNG drift, edited seed/count) into a hard
+error. You can't hand-write it (it needs resolving the recipe against the
+store), so `python -m rgrl.pin_selection data=<name>` prints the line to paste.
+The intended algebra (baseline inclusion, exactly 60 additions,
 disjoint follow-ups, exact reproduction of the historical sets) is executable in
 `tests/test_data.py` rather than documentary.
 

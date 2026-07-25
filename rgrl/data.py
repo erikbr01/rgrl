@@ -247,10 +247,11 @@ def _resolve_selection(selection: dict, store_path: Path | None, name: str = "se
     expected = selection.get("expected_sha256")
     actual = _episode_ids_sha256(episode_ids)
     if expected is None:
-        log.info(
-            "[selection] %s resolved %d episodes, unlocked (sha256 %s); "
-            "pin it with `expected_sha256: %r` to guard against silent drift",
-            name, len(episode_ids), actual, actual,
+        # Unlocked is the default. Keep this at debug so it doesn't nag every
+        # run; `python -m rgrl.pin_selection` prints the hash when you want it.
+        log.debug(
+            "[selection] %s resolved %d episodes, unlocked (sha256 %s)",
+            name, len(episode_ids), actual,
         )
     elif expected != actual:
         raise ValueError(
