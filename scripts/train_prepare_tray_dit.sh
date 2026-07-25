@@ -5,7 +5,7 @@ set -euo pipefail
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 exec "$(dirname "${BASH_SOURCE[0]}")/train_droid_flow.sh" \
   prepare_tray_baseline prepare_tray_baseline \
-  300000 150000 \
+  droid \
   prepare-tray-droid prepare_tray_baseline_dit \
   runs/prepare_tray_baseline_dit \
   "$@"
