@@ -240,14 +240,25 @@ def _resolve_selection(selection: dict, store_path: Path | None, name: str = "se
     # Audit lock: pin the exact resolved set. Catches a resolution that silently
     # drifted -- a missing/edited store curation.json, a numpy RNG stream change
     # across versions (NEP 19), or an edited seed/count -- rather than training on
-    # a different dataset than every prior run. Update it deliberately.
+    # a different dataset than every prior run. Update it deliberately. It is
+    # optional: you cannot know it when authoring a config (it takes resolving
+    # the recipe against the store), so it is a create-then-pin step -- resolve
+    # unlocked first, then paste the hash (see `python -m rgrl.pin_selection`).
     expected = selection.get("expected_sha256")
-    if expected is not None and expected != _episode_ids_sha256(episode_ids):
+    actual = _episode_ids_sha256(episode_ids)
+    if expected is None:
+        log.info(
+            "[selection] %s resolved %d episodes, unlocked (sha256 %s); "
+            "pin it with `expected_sha256: %r` to guard against silent drift",
+            name, len(episode_ids), actual, actual,
+        )
+    elif expected != actual:
         raise ValueError(
-            f"{name}: resolved to episode ids sha256 {_episode_ids_sha256(episode_ids)}, "
-            f"not the declared expected_sha256 {expected}. The resolved set changed "
-            "(missing/edited store curation.json, a numpy RNG version change, or an "
-            "edited seed/count). Update expected_sha256 only if this change is intended."
+            f"{name}: resolved to episode ids sha256 {actual}, not the declared "
+            f"expected_sha256 {expected}. The resolved set changed (missing/edited "
+            "store curation.json, a numpy RNG version change, or an edited "
+            "seed/count). Re-pin with `python -m rgrl.pin_selection` only if this "
+            "change is intended."
         )
     return episode_ids
 

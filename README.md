@@ -41,8 +41,12 @@ current update without multiprocessing large image batches.
   replacement (that's how the `set_table_plus*` follow-up splits add 60 disjoint
   episodes), and the success curation (unsuccessful→successful episode swaps) is
   baked into the store's `curation.json`. An explicit `episode_ids` escape hatch
-  remains for externally-curated sets, and `expected_sha256` pins the resolved
-  set. `robo_dataset.EpisodeView` then reads the resolved episodes from the
+  remains for externally-curated sets. An optional `expected_sha256` pins the
+  resolved set (a later silent change — edited `curation.json`, a numpy RNG
+  version bump, an edited seed/count — then errors instead of quietly training
+  on a different dataset); you don't hand-write it — author the recipe unlocked,
+  then `uv run python -m rgrl.pin_selection data=<name>` prints the line to
+  paste. `robo_dataset.EpisodeView` reads the resolved episodes from the
   original store without re-encoding or copying videos; only the resolved IDs
   enter the conversion-cache identity.
 - **Normalization**: fitting (method, per-key stats) is
