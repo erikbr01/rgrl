@@ -1,0 +1,13 @@
+# @package _global_
+# set_table baseline: single-wrist DROID DiT flow, 300k steps (training/droid).
+defaults:
+  - override /data: set_table_baseline
+  - override /target: set_table_baseline
+  - override /policy: dit_flow_droid
+  - override /training: droid
+
+training:
+  wandb_project: set-table-droid
+  wandb_name: set_table_baseline_dit
+
+out: runs/set_table_baseline_dit

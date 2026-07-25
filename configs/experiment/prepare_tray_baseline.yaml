@@ -1,0 +1,13 @@
+# @package _global_
+# prepare_tray baseline: single-wrist DROID DiT flow, 300k steps (training/droid).
+defaults:
+  - override /data: prepare_tray_baseline
+  - override /target: prepare_tray_baseline
+  - override /policy: dit_flow_droid
+  - override /training: droid
+
+training:
+  wandb_project: prepare-tray-droid
+  wandb_name: prepare_tray_baseline_dit
+
+out: runs/prepare_tray_baseline_dit

@@ -1,0 +1,8 @@
+# DROID follow-up splits (set_table_plus{left,middle,right}): the baseline
+# recipe at 1.5x the step budget, keeping epochs comparable to the 120-episode
+# baseline (180/120 = 1.5). save_every inherits droid's 100k cadence.
+defaults:
+  - droid
+  - _self_
+
+steps: 450000

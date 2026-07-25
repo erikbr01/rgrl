@@ -1,10 +1,9 @@
 name: set_table_baseline
-# Rebuilt store (all three cameras, incl. wrist_image_right -- right-eye
-# decode of the wrist ZED via robo_dataset's `SERIAL:right` camera spec),
-# task-filtered + idle-trimmed by policy_graphs' trim_droid_idle_beginnings.py.
-# The selection manifest owns the seed-42 60-right + 60-middle baseline,
-# success replacements, and provenance. It resolves to a zero-copy logical
-# EpisodeView over this three-camera physical store.
+# Rebuilt store (task-filtered + idle-trimmed by policy_graphs'
+# trim_droid_idle_beginnings.py). The store physically carries all three
+# DROID cameras, but this baseline trains on a single wrist camera
+# (wrist_image_left) + the exterior view; shape_meta below selects the subset.
+# The selection resolves to a zero-copy logical EpisodeView over the store.
 store_path: ${oc.env:RGRL_DATA_ROOT,/mnt/ssdB/erik}/droid_converted_v2_trimmed
 dataset_id: droid_v2_trimmed
 abs_action: false
@@ -24,10 +23,6 @@ selection:
 shape_meta:
   obs:
     wrist_image_left:
-      shape: [180, 320, 3]
-      type: rgb
-      channel_order: rgb
-    wrist_image_right:
       shape: [180, 320, 3]
       type: rgb
       channel_order: rgb

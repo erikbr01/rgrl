@@ -1,11 +1,5 @@
 #!/usr/bin/env bash
-# 120-episode prepare-tray selection. The checked-in manifest owns the exact
-# IDs and provenance; the cache is a zero-copy logical view of the source.
+# prepare_tray baseline (configs/experiment/prepare_tray_baseline.yaml).
 set -euo pipefail
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
-exec "$(dirname "${BASH_SOURCE[0]}")/train_droid_flow.sh" \
-  prepare_tray_baseline prepare_tray_baseline \
-  800000 400000 \
-  prepare-tray-droid prepare_tray_baseline_dit \
-  runs/prepare_tray_baseline_dit \
-  "$@"
+exec "$(dirname "${BASH_SOURCE[0]}")/train_droid_flow.sh" prepare_tray_baseline "$@"

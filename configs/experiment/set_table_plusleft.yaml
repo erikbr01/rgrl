@@ -1,0 +1,13 @@
+# @package _global_
+# set_table baseline + 60 disjoint left episodes; 450k steps (training/droid_plus).
+defaults:
+  - override /data: set_table_plusleft
+  - override /target: set_table_baseline
+  - override /policy: dit_flow_droid
+  - override /training: droid_plus
+
+training:
+  wandb_project: set-table-droid
+  wandb_name: set_table_plusleft_dit
+
+out: runs/set_table_plusleft_dit

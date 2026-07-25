@@ -1,11 +1,8 @@
-# All three DROID cameras this store has (see
-# policy_graphs/docs/droid_workflow.md's camera table).
+# Single wrist camera (wrist_image_left) + the exterior view. The store also
+# carries wrist_image_right (see policy_graphs/docs/droid_workflow.md's camera
+# table), but the baseline does not train on it.
 obs:
   wrist_image_left:
-    shape: [180, 320, 3]
-    type: rgb
-    channel_order: rgb
-  wrist_image_right:
     shape: [180, 320, 3]
     type: rgb
     channel_order: rgb
