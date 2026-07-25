@@ -23,7 +23,7 @@ import logging
 import os
 import shutil
 import uuid
-from collections import defaultdict
+from collections import Counter, defaultdict
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -182,10 +182,10 @@ def _resolve_selection(selection: dict, store_path: Path | None, name: str = "se
     if "episode_ids" in selection:
         if "select" in selection or "seed" in selection:
             raise ValueError(f"{name}: use either episode_ids or seed/select, not both")
-        # Preserve caller order (dedup keeping first occurrence): an explicit set
-        # is "exactly these episodes, in this order", matching the direct
-        # source_cfg episode_ids subset semantics.
-        episode_ids = list(dict.fromkeys(int(e) for e in selection["episode_ids"]))
+        # An explicit set is "exactly these episodes, in this order"; preserve
+        # order but require uniqueness up front (a repeated id is an authoring
+        # mistake, and the EpisodeView would reject it anyway).
+        episode_ids = [int(e) for e in selection["episode_ids"]]
     else:
         if "select" not in selection:
             raise ValueError(f"{name}: generative selection needs a 'select' list")
@@ -219,7 +219,18 @@ def _resolve_selection(selection: dict, store_path: Path | None, name: str = "se
                 raw = _seeded_choice(pool, count, seed)
             raw_used[task] |= set(raw)
             ids += _apply_curation(raw, curation.get(task, {}))
-        episode_ids = sorted(set(ids))
+        episode_ids = sorted(ids)
+
+    # Runtime episode-uniqueness guard: every resolved selection must map to
+    # distinct physical episodes. Duplicates would double-weight an episode's
+    # frames in training. Generative draws are disjoint by construction, but a
+    # curation substitute that a later same-task continuation happened to redraw
+    # would slip through -- catch it here rather than silently double-counting
+    # (or leaving a count/sha mismatch to explain).
+    if len(episode_ids) != len(set(episode_ids)):
+        counts = Counter(episode_ids)
+        dupes = sorted(e for e, c in counts.items() if c > 1)
+        raise ValueError(f"{name}: resolved selection has duplicate episodes {dupes}")
 
     if selection.get("count") is not None and int(selection["count"]) != len(episode_ids):
         raise ValueError(

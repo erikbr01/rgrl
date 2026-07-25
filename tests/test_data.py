@@ -362,6 +362,17 @@ def test_first_n_continuation_takes_the_next_n(tmp_path):
     assert ids == [0, 1, 2, 5, 6]
 
 
+def test_resolved_selection_rejects_duplicate_episodes(tmp_path):
+    """The runtime uniqueness guard fires for any resolved selection with a
+    repeated episode (here via an explicit list); generative draws are disjoint
+    by construction, but the guard also catches a curation-substitute redraw."""
+    from rgrl.data import _resolve_selection
+
+    store = _write_generative_store(tmp_path)
+    with pytest.raises(ValueError, match="duplicate episodes"):
+        _resolve_selection({"episode_ids": [0, 1, 0]}, store)
+
+
 def test_selection_method_validation(tmp_path):
     from rgrl.data import _resolve_selection
 
@@ -530,6 +541,46 @@ def test_episode_ids_are_validated(video_store_path, tmp_path, episode_ids, mess
     source_cfg = _video_store_source_cfg(video_store_path, episode_ids=episode_ids)
     with pytest.raises((TypeError, ValueError), match=message):
         load_store(source_cfg, source_cfg["shape_meta"], cache_root=tmp_path / "cache")
+
+
+def test_generative_selection_builds_a_unique_episode_dataset(video_store_path, tmp_path):
+    """End-to-end episode uniqueness at construction time: a generative selection
+    -> load_store -> dataset windows. Every logical episode maps to a distinct
+    physical episode, no frame is reused (num_frames == sum of the selected
+    episodes' lengths), and no observation window straddles an episode boundary."""
+    from robo_dataset.store_factory import open_store
+    from rgrl.dataset import Windows, _split_bounds, _windows_index_table
+
+    # Tag the 4 source episodes (lengths 5, 4, 6, 3) with two tasks, then pick
+    # one per task plus a second 'A' -- a continuation, so uniqueness across the
+    # repeated task is exercised at build time, not just in resolution.
+    (Path(video_store_path) / "tasks.json").write_text(
+        json.dumps({"0": "A", "1": "A", "2": "B", "3": "B"})
+    )
+    source_cfg = _video_store_source_cfg(video_store_path)
+    source_cfg["selection"] = {
+        "method": "first_n",
+        "select": [
+            {"task": "A", "count": 1},
+            {"task": "B", "count": 1},
+            {"task": "A", "count": 1},  # continuation -> next 'A' by id
+        ],
+    }
+    store = load_store(source_cfg, source_cfg["shape_meta"], cache_root=tmp_path / "cache")
+
+    phys = list(store.episode_ids)
+    assert phys == [0, 1, 2]  # A:0, B:2, then next A:1 -- resorted logical order
+    assert len(phys) == len(set(phys)) == store.meta.num_episodes  # unique episodes
+
+    src = open_store(video_store_path)
+    # No frame reused: total frames == sum over the DISTINCT selected episodes.
+    assert store.meta.num_frames == sum(src.episode_length(i) for i in phys)
+
+    # No window crosses an episode boundary in the constructed dataset.
+    bounds = _split_bounds(store, 0, store.meta.num_episodes)
+    obs, _act, _pad = _windows_index_table(bounds, Windows(obs_horizon=2, horizon=4))
+    frame_ep = {f: ep for ep, (lo, hi) in enumerate(bounds.tolist()) for f in range(lo, hi)}
+    assert all(len({frame_ep[int(f)] for f in row}) == 1 for row in obs.numpy())
 
 
 def test_short_prefix_collision_detected_by_full_hash(tmp_path):
