@@ -782,7 +782,7 @@ def _tiny_train_cfg(out, **overrides):
     return TrainConfig(**values)
 
 
-def _train_tiny(tiny_store, cfg):
+def _train_tiny(tiny_store, cfg, run_config=None):
     seed_everything(cfg.seed)
     policy = _TinyRandomLossPolicy()
     path = train(
@@ -793,8 +793,39 @@ def _train_tiny(tiny_store, cfg):
         {"name": "tiny"},
         {"obs": {"state": {"shape": [3]}}, "action": {"shape": [2]}},
         {"kind": "uniform", "weights_path": None, "replacement": False},
+        run_config=run_config,
     )
     return torch.load(path, map_location="cpu", weights_only=False)
+
+
+def test_full_run_config_is_recorded(tiny_store, tmp_path):
+    # The entire Hydra config is logged verbatim, not a reconstructed subset:
+    # an arbitrary top-level knob (`stats_workers`) and every group survive.
+    out = tmp_path / "run"
+    cfg = _tiny_train_cfg(out)
+    run_config = {
+        "data": {"name": "tiny", "episodes": [0, 1, 2]},
+        "target": {"obs": {"state": {"shape": [3]}}, "action": {"shape": [2]}},
+        "policy": {"_target_": "tests._TinyRandomLossPolicy"},
+        "training": {"steps": 6, "seed": 123},
+        "sampling": {"kind": "uniform"},
+        "out": str(out),
+        "stats_workers": 7,
+    }
+    checkpoint = _train_tiny(tiny_store, cfg, run_config=run_config)
+    saved = json.loads((out / "config.json").read_text())
+    # Every launched-with key is present, including ones train() never sees
+    # directly.
+    assert saved["stats_workers"] == 7
+    assert saved["training"] == {"steps": 6, "seed": 123}
+    assert saved["data"] == {"name": "tiny", "episodes": [0, 1, 2]}
+    # Inference contract keys (checkpoint self-containment) survive the merge.
+    assert saved["policy"] == {"_target_": "tests._TinyRandomLossPolicy"}
+    assert saved["target"] == {"obs": {"state": {"shape": [3]}}, "action": {"shape": [2]}}
+    assert "env_meta" in saved
+    assert "resolved_training" in saved
+    # config.json and the checkpoint carry the same config.
+    assert checkpoint["config"] == saved
 
 
 def _assert_nested_equal(left, right):

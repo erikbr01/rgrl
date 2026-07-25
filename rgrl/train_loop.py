@@ -316,11 +316,16 @@ def train(
     target_cfg: dict,
     sampling_cfg: dict,
     sample_weights: torch.Tensor | None = None,
+    run_config: dict | None = None,
 ) -> Path:
     """Train ``policy`` and return the atomically-published latest checkpoint.
 
     The caller must invoke :func:`seed_everything` before constructing
     ``policy``. ``train.py`` does so at the application boundary.
+
+    ``run_config`` is the complete resolved Hydra config; when supplied it is
+    logged verbatim (to wandb and config.json) so the whole run definition is
+    recorded, not just the pieces this function is handed separately.
     """
     out = Path(cfg.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -335,6 +340,7 @@ def train(
             sampling_cfg,
             out,
             sample_weights,
+            run_config,
         )
 
 
@@ -348,6 +354,7 @@ def _train(
     sampling_cfg: dict,
     out: Path,
     sample_weights: torch.Tensor | None = None,
+    run_config: dict | None = None,
 ) -> Path:
     recipe = resolve_recipe(cfg)
     device = torch.device(cfg.device)
@@ -414,8 +421,15 @@ def _train(
     resolved_config = dataclasses.asdict(recipe)
 
     def full_config() -> dict:
-        return {
-            **dataclasses.asdict(cfg),
+        # Facts derived at train time that are not in the raw Hydra tree but
+        # that a self-contained checkpoint and a faithful run record need:
+        #   resolved_training -- the recipe after resolve_recipe()
+        #   store             -- `data` after resolve_source_config() froze the
+        #                        episode selection (legacy inference reads it)
+        #   env_meta          -- read from the opened store, not the config
+        # target/policy/sampling are also the effective values inference and
+        # resume read, kept at the top level.
+        derived = {
             "resolved_training": resolved_config,
             "store": store_cfg,
             "target": target_cfg,
@@ -423,6 +437,15 @@ def _train(
             "sampling": sampling_cfg,
             "env_meta": store.meta.env_meta,
         }
+        if run_config is None:
+            # Direct callers (e.g. tests) that don't thread the Hydra config:
+            # keep the previous reconstructed shape, still inference-complete.
+            return {**dataclasses.asdict(cfg), **derived}
+        # Everything the run was launched with (every config group and
+        # top-level knob), overlaid with the derived/effective values above.
+        # The Hydra tree already places target/policy/sampling at the top
+        # level, so the inference contract keys stay in place.
+        return {**run_config, **derived}
 
     resume_spec = _resume_spec(
         cfg,

@@ -66,6 +66,10 @@ def main(cfg: DictConfig) -> None:
         if sample_weights_path
         else None
     )
+    # The entire resolved Hydra config (every group and top-level knob) so the
+    # full run definition — not a hand-assembled subset — is what lands in
+    # wandb and config.json. hydra.main already strips its own `hydra:` node.
+    run_config = OmegaConf.to_container(cfg, resolve=True)
     train(
         training,
         policy,
@@ -75,6 +79,7 @@ def main(cfg: DictConfig) -> None:
         OmegaConf.to_container(cfg.target, resolve=True),
         sampling,
         sample_weights=sample_weights,
+        run_config=run_config,
     )
 
 
