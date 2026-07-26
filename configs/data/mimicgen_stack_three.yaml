@@ -1,0 +1,13 @@
+# MimicGen stack_three_d0 (1000 demos, robosuite 1.4.1 native OSC_POSE, state).
+name: mimicgen_stack_three_lowdim
+path: /mnt/ssdB/erik/policy_graphs/data/source/mimicgen/core/stack_three_d0.hdf5
+abs_action: false
+rename: {}
+shape_meta:
+  obs:
+    object: {shape: [39], type: low_dim}
+    robot0_eef_pos: {shape: [3], type: low_dim}
+    robot0_eef_quat: {shape: [4], type: low_dim, quat_convention: xyzw}
+    robot0_gripper_qpos: {shape: [2], type: low_dim}
+  action:
+    shape: [7]
