@@ -1,0 +1,13 @@
+# MimicGen kitchen_d0 (1000 demos, robosuite 1.4.1 native, state-based). Delta actions [7].
+name: mimicgen_kitchen_lowdim
+path: /mnt/ssdB/erik/policy_graphs/data/source/mimicgen/core/kitchen_d0.hdf5
+abs_action: false
+rename: {}
+shape_meta:
+  obs:
+    object: {shape: [56], type: low_dim}
+    robot0_eef_pos: {shape: [3], type: low_dim}
+    robot0_eef_quat: {shape: [4], type: low_dim, quat_convention: xyzw}
+    robot0_gripper_qpos: {shape: [2], type: low_dim}
+  action:
+    shape: [7]
