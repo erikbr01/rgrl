@@ -1,0 +1,40 @@
+name: prepare_tray_plusbottom
+# Same full prepare_tray store as configs/data/prepare_tray_baseline.yaml. Adds
+# 60 more, disjoint "prepare tray - bottom" episodes on top of the baseline's
+# 60 top + 60 bottom (180 total: 60 top + 120 bottom).
+store_path: ${oc.env:RGRL_DATA_ROOT,/mnt/ssdB/erik}/droid_converted_prepare_tray_all_trimmed
+dataset_id: droid_prepare_tray_all_trimmed
+abs_action: false
+rename: {}
+# Baseline (60 top + 60 bottom) plus 60 more "bottom": listing "bottom" a second
+# time continues the same seed-42 draw without replacement, so these 60 are
+# disjoint from the baseline's 60 bottom. The baseline's IDs are a strict subset.
+selection:
+  seed: 42
+  select:
+    - task: "prepare tray - top"
+      count: 60
+    - task: "prepare tray - bottom"
+      count: 60
+    - task: "prepare tray - bottom"
+      count: 60
+  count: 180
+  expected_sha256: "2ef093e679994978c9e99125f39853eacd445eb444d038fadc0a0114c3708bf5"
+shape_meta:
+  obs:
+    wrist_image_left:
+      shape: [180, 320, 3]
+      type: rgb
+      channel_order: rgb
+    exterior_image_1_left:
+      shape: [180, 320, 3]
+      type: rgb
+      channel_order: rgb
+    joint_positions:
+      shape: [7]
+      type: low_dim
+    gripper_position:
+      shape: [1]
+      type: low_dim
+  action:
+    shape: [8]

@@ -1,15 +1,14 @@
 name: prepare_tray_baseline
-store_path: ${oc.env:RGRL_HOME_DATA_ROOT,/home/erbauer}/policy_graphs/data/droid_converted_prepare_tray_trimmed
-dataset_id: droid_prepare_tray_trimmed
+store_path: ${oc.env:RGRL_DATA_ROOT,/mnt/ssdB/erik}/droid_converted_prepare_tray_all_trimmed
+dataset_id: droid_prepare_tray_all_trimmed
 abs_action: false
 rename: {}
 # Fixed, reproducible 120-episode logical view: 60 prepare-tray-top and
-# 60 prepare-tray-bottom episodes. The versioned manifest owns IDs and
-# provenance; cache creation links this physical store without re-encoding.
-# Generative selection resolved against the store's tasks.json: a seed-42 draw
-# of 60 "top" + 60 "bottom" (diffusion_policy's original episodes_per_task draw
-# used the same default_rng(42).choice contract, so this reproduces it exactly).
-# No success curation for this dataset.
+# 60 prepare-tray-bottom episodes. Resolved against the full prepare_tray store
+# (droid_converted_prepare_tray_all_trimmed: all dates, 127 top + 136 bottom)
+# via a seed-42 draw. Listing a task a second time in a plus-config continues
+# this same seeded draw without replacement, so baseline IDs are a strict
+# subset of prepare_tray_plustop / prepare_tray_plusbottom. No success curation.
 selection:
   seed: 42
   select:
@@ -18,6 +17,7 @@ selection:
     - task: "prepare tray - bottom"
       count: 60
   count: 120
+  expected_sha256: "bde545933d43bcaefe92d477bb99fc6093ebee90a8d109be60f4eef6f2b79b3d"
 shape_meta:
   obs:
     wrist_image_left:
