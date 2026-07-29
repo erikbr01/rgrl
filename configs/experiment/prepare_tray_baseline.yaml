@@ -9,5 +9,8 @@ defaults:
 training:
   wandb_project: prepare-tray-droid
   wandb_name: prepare_tray_baseline_dit
+  # batch 256 to match the earlier prepare_tray runs; fits a 24GB 4090 at
+  # 2 cameras (the training/droid default 128 is capped for the 3-camera case).
+  batch_size: 256
 
 out: runs/prepare_tray_experiments/baseline_dit
