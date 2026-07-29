@@ -1,0 +1,13 @@
+# @package _global_
+# prepare_tray baseline + 60 disjoint top episodes; 450k steps (training/droid_plus).
+defaults:
+  - override /data: prepare_tray_plustop
+  - override /target: prepare_tray_baseline
+  - override /policy: dit_flow_droid
+  - override /training: droid_plus
+
+training:
+  wandb_project: prepare-tray-droid
+  wandb_name: prepare_tray_plustop_dit
+
+out: runs/prepare_tray_experiments/plustop_dit

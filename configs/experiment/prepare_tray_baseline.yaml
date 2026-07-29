@@ -10,4 +10,4 @@ training:
   wandb_project: prepare-tray-droid
   wandb_name: prepare_tray_baseline_dit
 
-out: runs/prepare_tray_baseline_dit
+out: runs/prepare_tray_experiments/baseline_dit
