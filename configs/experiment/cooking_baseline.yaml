@@ -1,0 +1,19 @@
+# @package _global_
+# cooking baseline: single-wrist DROID DiT flow, 300k steps (training/droid).
+# Cooking episodes are longer than prepare_tray/set_table, so the baseline was
+# under-trained at 300k; continue to 450k with resume=extend (see README/PR).
+defaults:
+  - override /data: cooking_baseline
+  - override /target: cooking_baseline
+  - override /policy: dit_flow_droid
+  - override /training: droid
+
+training:
+  wandb_project: cooking-droid
+  wandb_name: cooking_baseline_dit
+  # batch 256 (same as prepare_tray). The ~31GB cooking store exceeds 24GB VRAM,
+  # so the loader keeps it in host RAM (shared_memory) rather than cuda_resident,
+  # which leaves room for batch 256 on a 24GB 4090.
+  batch_size: 256
+
+out: runs/cooking_baseline_dit

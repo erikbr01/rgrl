@@ -1,0 +1,20 @@
+# Matches configs/data/cooking_baseline.yaml's shape_meta -- a single wrist
+# camera (wrist_image_left) + the exterior view. The physical store also holds
+# wrist_image_right, but the baseline does not train on it.
+obs:
+  wrist_image_left:
+    shape: [180, 320, 3]
+    type: rgb
+    channel_order: rgb
+  exterior_image_1_left:
+    shape: [180, 320, 3]
+    type: rgb
+    channel_order: rgb
+  joint_positions:
+    shape: [7]
+    type: low_dim
+  gripper_position:
+    shape: [1]
+    type: low_dim
+action:
+  shape: [8]
