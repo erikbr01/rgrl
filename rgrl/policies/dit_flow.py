@@ -41,6 +41,11 @@ class DiTFlowConfig:
     mlp_ratio: float = 4.0
     num_kp: int = 32
     share_image_encoder: bool = False
+    # ImageNet-pretrained ResNet18 backbone. Default True: a random-init backbone
+    # is badly data-starved on small demo sets (it silently tanked DROID
+    # real-robot performance). Pair with image_norm=imagenet (DROID does).
+    pretrained_backbone: bool = True
+    image_norm: str = "unit"  # unit | neg_one_one | imagenet (see encoders.IMAGE_NORM_STATS)
     # See DiffusionConfig.data_transforms -- same scheme.
     data_transforms: list[Callable] = field(default_factory=default_transforms)
     inference_steps: int = 10
@@ -67,6 +72,8 @@ class DiTFlowPolicy(nn.Module):
             target_hw,
             num_kp=cfg.num_kp,
             share_image_encoder=cfg.share_image_encoder,
+            pretrained=cfg.pretrained_backbone,
+            image_norm=cfg.image_norm,
         )
         self.act_dim = store.meta.keys["action"].shape[0]
         self.action_norm = Normalizer(KeyNormalizer.from_dict(store.stats["action"]))
