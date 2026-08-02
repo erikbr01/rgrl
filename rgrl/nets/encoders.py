@@ -66,7 +66,7 @@ class ResNet18Encoder(nn.Module):
         image_hw: tuple[int, int],
         num_kp: int = 32,
         pretrained: bool = True,
-        image_norm: str = "unit",
+        image_norm: str = "imagenet",
     ):
         super().__init__()
         if image_norm not in IMAGE_NORM_STATS:

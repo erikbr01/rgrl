@@ -48,7 +48,7 @@ class ObsEncoder(nn.Module):
         num_kp: int = 32,
         share_image_encoder: bool = False,
         pretrained: bool = True,
-        image_norm: str = "unit",
+        image_norm: str = "imagenet",
     ):
         super().__init__()
         self.obs_horizon = obs_horizon

@@ -45,7 +45,7 @@ class DiTFlowConfig:
     # is badly data-starved on small demo sets (it silently tanked DROID
     # real-robot performance). Pair with image_norm=imagenet (DROID does).
     pretrained_backbone: bool = True
-    image_norm: str = "unit"  # unit | neg_one_one | imagenet (see encoders.IMAGE_NORM_STATS)
+    image_norm: str = "imagenet"  # unit | neg_one_one | imagenet (see encoders.IMAGE_NORM_STATS)
     # See DiffusionConfig.data_transforms -- same scheme.
     data_transforms: list[Callable] = field(default_factory=default_transforms)
     inference_steps: int = 10

@@ -6,11 +6,7 @@ defaults:
   - dit_flow
   - _self_
 
-# The backbone is pretrained by default (dit_flow). DROID additionally uses
-# ImageNet input normalization to match the pretrained weights' training
-# distribution (the convention diffusion_policy/UMI use for DROID).
-image_norm: imagenet
-
+# pretrained_backbone + image_norm=imagenet are inherited from dit_flow.
 data_transforms:
   - _target_: rgrl.transforms.CropTransform
     _partial_: true  # image_keys is bound by ObsEncoder once the store loads
