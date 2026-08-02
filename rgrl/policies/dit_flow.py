@@ -41,6 +41,15 @@ class DiTFlowConfig:
     mlp_ratio: float = 4.0
     num_kp: int = 32
     share_image_encoder: bool = False
+    # Vision backbone. "resnet18" = torchvision ResNet18 + SpatialSoftmax; any
+    # other name is a timm model (e.g. "vit_small_patch14_dinov2.lvd142m").
+    backbone: str = "resnet18"
+    # Pretrained by default: a random-init backbone is badly data-starved on
+    # small demo sets. Pair with image_norm=imagenet.
+    pretrained_backbone: bool = True
+    image_norm: str = "unit"  # unit | neg_one_one | imagenet (encoders.IMAGE_NORM_STATS)
+    vit_img_size: int = 224   # square input a patch-based (timm) backbone is resized to
+    frozen_backbone: bool = False
     # See DiffusionConfig.data_transforms -- same scheme.
     data_transforms: list[Callable] = field(default_factory=default_transforms)
     inference_steps: int = 10
@@ -67,6 +76,11 @@ class DiTFlowPolicy(nn.Module):
             target_hw,
             num_kp=cfg.num_kp,
             share_image_encoder=cfg.share_image_encoder,
+            backbone=cfg.backbone,
+            pretrained=cfg.pretrained_backbone,
+            image_norm=cfg.image_norm,
+            vit_img_size=cfg.vit_img_size,
+            frozen_backbone=cfg.frozen_backbone,
         )
         self.act_dim = store.meta.keys["action"].shape[0]
         self.action_norm = Normalizer(KeyNormalizer.from_dict(store.stats["action"]))

@@ -32,7 +32,7 @@ import torch
 from robo_dataset.normalization import KeyNormalizer
 from torch import nn
 
-from rgrl.nets.encoders import ResNet18Encoder
+from rgrl.nets.encoders import ResNet18Encoder, TimmEncoder
 from rgrl.normalize import Normalizer
 from rgrl.store import EpisodeStore
 
@@ -47,6 +47,11 @@ class ObsEncoder(nn.Module):
         target_hw: tuple[int, int] | None = None,
         num_kp: int = 32,
         share_image_encoder: bool = False,
+        backbone: str = "resnet18",
+        pretrained: bool = True,
+        image_norm: str = "unit",
+        vit_img_size: int = 224,
+        frozen_backbone: bool = False,
     ):
         super().__init__()
         self.obs_horizon = obs_horizon
@@ -73,15 +78,32 @@ class ObsEncoder(nn.Module):
             self.state_norms[k.replace(".", "_")] = Normalizer(KeyNormalizer.from_dict(store.stats[k]))
             state_dim += dim
 
+        def make_image_encoder():
+            # "resnet18" -> the torchvision ResNet18 + SpatialSoftmax stack;
+            # any other name is a timm backbone (e.g. a DINOv2/CLIP ViT).
+            if backbone == "resnet18":
+                return ResNet18Encoder(
+                    target_hw, num_kp=num_kp, pretrained=pretrained, image_norm=image_norm
+                )
+            return TimmEncoder(
+                target_hw,
+                model_name=backbone,
+                num_kp=num_kp,
+                pretrained=pretrained,
+                image_norm=image_norm,
+                img_size=vit_img_size,
+                frozen=frozen_backbone,
+            )
+
         self.encoders = nn.ModuleDict()
         feat_dim = 0
         if self.image_keys and share_image_encoder:
-            self.shared_encoder = ResNet18Encoder(target_hw, num_kp=num_kp)
+            self.shared_encoder = make_image_encoder()
             feat_dim = len(self.image_keys) * self.shared_encoder.out_dim
         else:
             self.shared_encoder = None
             for k in self.image_keys:
-                enc = ResNet18Encoder(target_hw, num_kp=num_kp)
+                enc = make_image_encoder()
                 self.encoders[k.replace(".", "_")] = enc
                 feat_dim += enc.out_dim
 

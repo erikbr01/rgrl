@@ -15,6 +15,14 @@ num_kp: 32
 # This reduces parameters/optimizer state, but is not checkpoint-compatible
 # with the default per-camera encoders and should be ablated before rollout.
 share_image_encoder: false
+# Vision backbone: "resnet18" (torchvision ResNet18 + SpatialSoftmax) or any
+# timm model name (e.g. "vit_small_patch14_dinov2.lvd142m"). Pretrained by
+# default; image_norm should be "imagenet" whenever the backbone is pretrained.
+backbone: resnet18
+pretrained_backbone: true
+image_norm: unit  # unit | neg_one_one | imagenet
+vit_img_size: 224  # square size a timm/ViT backbone resizes its input to
+frozen_backbone: false
 data_transforms:
   - _target_: rgrl.transforms.CropTransform
     _partial_: true  # image_keys, unknown until the store loads, is bound by ObsEncoder

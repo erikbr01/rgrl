@@ -12,6 +12,7 @@ dependencies = [
     "hydra-core>=1.3",
     "tqdm>=4.66",
     "robo_dataset",
+    "timm>=1.0.28",
 ]
 
 [project.optional-dependencies]
