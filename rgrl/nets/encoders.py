@@ -76,7 +76,7 @@ class ResNet18Encoder(nn.Module):
         image_hw: tuple[int, int],
         num_kp: int = 32,
         pretrained: bool = True,
-        image_norm: str = "unit",
+        image_norm: str = "imagenet",
     ):
         super().__init__()
         weights = ResNet18_Weights.DEFAULT if pretrained else None

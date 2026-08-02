@@ -20,7 +20,7 @@ share_image_encoder: false
 # default; image_norm should be "imagenet" whenever the backbone is pretrained.
 backbone: resnet18
 pretrained_backbone: true
-image_norm: unit  # unit | neg_one_one | imagenet
+image_norm: imagenet  # unit | neg_one_one | imagenet
 vit_img_size: 224  # square size a timm/ViT backbone resizes its input to
 frozen_backbone: false
 data_transforms:

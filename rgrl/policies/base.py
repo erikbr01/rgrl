@@ -49,7 +49,7 @@ class ObsEncoder(nn.Module):
         share_image_encoder: bool = False,
         backbone: str = "resnet18",
         pretrained: bool = True,
-        image_norm: str = "unit",
+        image_norm: str = "imagenet",
         vit_img_size: int = 224,
         frozen_backbone: bool = False,
     ):

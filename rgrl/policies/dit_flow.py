@@ -47,7 +47,7 @@ class DiTFlowConfig:
     # Pretrained by default: a random-init backbone is badly data-starved on
     # small demo sets. Pair with image_norm=imagenet.
     pretrained_backbone: bool = True
-    image_norm: str = "unit"  # unit | neg_one_one | imagenet (encoders.IMAGE_NORM_STATS)
+    image_norm: str = "imagenet"  # unit | neg_one_one | imagenet (encoders.IMAGE_NORM_STATS)
     vit_img_size: int = 224   # square input a patch-based (timm) backbone is resized to
     frozen_backbone: bool = False
     # See DiffusionConfig.data_transforms -- same scheme.
