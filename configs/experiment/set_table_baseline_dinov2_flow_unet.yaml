@@ -1,0 +1,21 @@
+# @package _global_
+# set_table baseline: UNet + rectified-flow head with a DINOv2 ViT-S/14 backbone
+# (timm), pretrained + ImageNet norm. Same data/target/recipe as
+# set_table_baseline; only the denoiser (UNet-flow) and backbone (DINOv2) differ.
+defaults:
+  - override /data: set_table_baseline
+  - override /target: set_table_baseline
+  - override /policy: flow_droid_dinov2
+  - override /training: droid
+
+training:
+  wandb_project: set-table-droid
+  wandb_name: set_table_baseline_dinov2_flow_unet
+  # 64 (vs the ResNet flow baseline's 256): two fine-tuned DINOv2 ViT-S/14
+  # backbones at 224x224 are memory-heavy -- 256 and 128 both OOM a 24GB 4090.
+  # Launch with data_mode=shared_memory and, to trim allocator fragmentation,
+  # PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True. For a larger batch, freeze
+  # the backbone (policy.frozen_backbone=true) or enable grad checkpointing.
+  batch_size: 64
+
+out: runs/set_table_baseline_dinov2_flow_unet

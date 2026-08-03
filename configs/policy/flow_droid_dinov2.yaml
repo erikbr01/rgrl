@@ -1,0 +1,13 @@
+# DROID flow (UNet) with a DINOv2 ViT-S/14 vision backbone (timm), pretrained +
+# ImageNet-normalized. Images are resized to vit_img_size (224 -> 16x16 patches
+# at patch 14) inside the encoder. Per-camera encoders (share_image_encoder
+# inherited false), so this trains two ViT-S backbones.
+defaults:
+  - flow_droid
+  - _self_
+
+backbone: vit_small_patch14_dinov2.lvd142m
+pretrained_backbone: true
+image_norm: imagenet
+vit_img_size: 224
+frozen_backbone: false
