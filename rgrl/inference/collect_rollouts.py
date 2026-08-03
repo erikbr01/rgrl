@@ -175,11 +175,19 @@ class RecordingEnv:
     the action that produced it, and (if `policy` is given) that policy's
     `.last_activations` at the moment of the step -- mirroring
     diffusion_policy's DROIDInferenceEnv.step()/pop_episode_data() pairing
-    (obs recorded *after* applying the action, paired with that action)."""
+    (obs recorded *after* applying the action, paired with that action).
 
-    def __init__(self, env, policy=None):
+    `keep_obs_keys`, if given, drops every other obs key before it's copied
+    into episode_data -- a real DROID env hands back every camera it has
+    (e.g. 4), even when a checkpoint's shape_meta only consumes 2 of them;
+    retaining the rest for a full max_timesteps episode is multiple GB of
+    native-resolution frames per episode for nothing. None keeps everything
+    (back-compat for callers that don't know their obs keys up front)."""
+
+    def __init__(self, env, policy=None, keep_obs_keys: set[str] | None = None):
         self._env = env
         self._policy = policy
+        self._keep_obs_keys = keep_obs_keys
         self._episode_data: list[dict] = []
 
     @property
@@ -196,10 +204,11 @@ class RecordingEnv:
     def step(self, actions: np.ndarray, active: np.ndarray | None = None):
         obs, reward, done, info = self._env.step(actions, active)
         activations = self._policy.last_activations if self._policy is not None else None
+        kept_obs = obs if self._keep_obs_keys is None else {k: v for k, v in obs.items() if k in self._keep_obs_keys}
         self._episode_data.append(
             {
                 "timestep": len(self._episode_data),
-                "obs": {k: np.asarray(v[0]).copy() for k, v in obs.items()},
+                "obs": {k: np.asarray(v[0]).copy() for k, v in kept_obs.items()},
                 "action": np.asarray(actions[0], dtype=np.float32).copy(),
                 # drop the leading batch dim (always 1 -- one physical robot),
                 # matching the documented (n_steps, D) embeddings.npz shape.
@@ -217,22 +226,29 @@ class RecordingEnv:
             self._env.close()
 
 
-def _write_mp4(path: Path, frames: list[np.ndarray], fps: float, crf: int = 18) -> None:
+def _write_mp4(path: Path, frames, fps: float, crf: int = 18) -> None:
     """CRF-18 H.264, matching diffusion_policy's rollout-recording quality
     (higher than robo_dataset's own VideoStoreWriter default of CRF-23 --
-    these are the canonical source recordings, not a re-encoded copy)."""
+    these are the canonical source recordings, not a re-encoded copy).
+
+    `frames` is any iterable (a generator over episode_data works) -- pulled
+    one at a time rather than materialized into a second full-episode list
+    on top of the one already held in episode_data."""
     import fractions
+    import itertools
 
     import av
 
-    if not frames:
+    it = iter(frames)
+    first = next(it, None)
+    if first is None:
         return
-    h, w = frames[0].shape[:2]
+    h, w = first.shape[:2]
     container = av.open(str(path), "w")
     stream = container.add_stream("libx264", rate=fractions.Fraction(fps).limit_denominator(1000))
     stream.width, stream.height, stream.pix_fmt = w, h, "yuv420p"
     stream.options = {"crf": str(crf), "preset": "fast"}
-    for frame in frames:
+    for frame in itertools.chain((first,), it):
         for packet in stream.encode(av.VideoFrame.from_ndarray(frame, format="rgb24")):
             container.mux(packet)
     for packet in stream.encode():
@@ -244,6 +260,10 @@ _ACTION_SPACE_KEYS = {
     "joint_velocity": ("joint_velocity", "joint_position"),
     "joint_position": ("joint_position", "joint_velocity"),
 }
+
+# low-dim obs keys _write_droid_trajectory reads -- kept in episode_data
+# alongside whatever cameras the policy actually consumes (see RecordingEnv).
+_DROID_STATE_KEYS = ("joint_positions", "cartesian_position", "gripper_position")
 
 
 def _write_droid_trajectory(
@@ -318,7 +338,7 @@ def _save_episode(
 
     camera_keys = [k for k in image_keys if episode_data and k in episode_data[0]["obs"]]
     for key in camera_keys:
-        frames = [entry["obs"][key] for entry in episode_data]
+        frames = (entry["obs"][key] for entry in episode_data)
         _write_mp4(ep_dir / f"{key}.mp4", frames, fps=control_hz)
 
     for layer in capture_layers:
@@ -381,7 +401,8 @@ def main(cfg: DictConfig) -> None:
     image_keys = sorted(
         k for k, v in meta_from_policy(policy)["shape_meta"]["obs"].items() if v.get("type") == "rgb"
     )
-    recording_env = RecordingEnv(env, policy=policy if cfg.capture_layers else None)
+    keep_obs_keys = set(image_keys) | (set(_DROID_STATE_KEYS) if is_droid else set())
+    recording_env = RecordingEnv(env, policy=policy if cfg.capture_layers else None, keep_obs_keys=keep_obs_keys)
 
     if InferenceMode(cfg.mode) == InferenceMode.ASYNC_STREAMING and cfg.capture_layers:
         log.warning(
@@ -429,6 +450,7 @@ def main(cfg: DictConfig) -> None:
         success, note, retry = _prompt_outcome(ep) if use_tty else (None, "", False)
         if retry:
             log.info("episode %d: retrying (not saved)", ep)
+            episode_data = None  # drop now -- otherwise held alive through the whole retry episode
             continue
 
         ts = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
@@ -451,6 +473,7 @@ def main(cfg: DictConfig) -> None:
             ep,
             OmegaConf.to_container(cfg, resolve=True),
         )
+        episode_data = None  # drop now -- otherwise held alive through the next episode's recording
         successes.append(success)
         log.info(
             "episode %d: %d steps, %d chunks, %.1f ms avg latency — %s%s -> %s",
