@@ -11,11 +11,9 @@ defaults:
 training:
   wandb_project: set-table-droid
   wandb_name: set_table_baseline_dinov2_dit
-  # 64 (vs the ResNet baseline's 256): two fine-tuned DINOv2 ViT-S/14 backbones
-  # at 224x224 are memory-heavy -- 256 and 128 both OOM a 24GB 4090. Launch with
-  # data_mode=shared_memory (store off-GPU) and, to trim allocator fragmentation,
-  # PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True. For a larger batch, freeze
-  # the backbone (policy.frozen_backbone=true) or enable grad checkpointing.
+  # 64: two fine-tuned ViT-S/14 backbones at 224x224 OOM a 24GB 4090 at 128/256.
+  # Run with data_mode=shared_memory + PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True;
+  # for a larger batch, freeze the backbone (policy.frozen_backbone=true).
   batch_size: 64
 
 out: runs/set_table_baseline_dinov2_dit

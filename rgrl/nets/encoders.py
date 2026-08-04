@@ -13,11 +13,9 @@ import torchvision
 from torch import nn
 from torchvision.models import ResNet18_Weights
 
-# Per-channel (mean, std) applied to [0,1] RGB images before the backbone:
-#   unit         -> identity ([0,1]; rgrl's historical behavior)
-#   neg_one_one  -> [0,1] -> [-1,1] (diffusion_policy's fixed_range convention)
-#   imagenet     -> ImageNet mean/std (correct for ImageNet/timm-pretrained
-#                   backbones; the normalization UMI's TimmObsEncoder uses)
+# Per-channel (mean, std) mapping [0,1] RGB before the backbone. Use "imagenet"
+# for ImageNet/timm-pretrained backbones; "neg_one_one" is diffusion_policy's
+# fixed_range; "unit" is a no-op.
 IMAGE_NORM_STATS = {
     "unit": ((0.0, 0.0, 0.0), (1.0, 1.0, 1.0)),
     "neg_one_one": ((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
@@ -97,13 +95,11 @@ class ResNet18Encoder(nn.Module):
 class TimmEncoder(nn.Module):
     """timm backbone -> (B, feat_dim) pooled feature vector.
 
-    A minimal port of UMI's TimmObsEncoder: build any timm model by name with
-    ImageNet/CLIP-pretrained weights, remove its classifier (num_classes=0 ->
-    the model's own global pool yields a feature vector), optionally freeze it,
-    and apply the configured input normalization. Patch-based backbones (e.g.
-    DINOv2 ViT, patch 14) require a fixed square input, so images are resized to
-    ``img_size`` before the model. ``num_kp`` is accepted for a uniform
-    ObsEncoder call signature but unused (there is no SpatialSoftmax here).
+    Port of UMI's TimmObsEncoder: build any timm model by name (num_classes=0 ->
+    global-pooled features), optionally frozen, with the configured input norm.
+    Patch backbones (e.g. DINOv2 ViT/14) need a fixed square input, so images are
+    resized to ``img_size``. ``num_kp`` is unused (no SpatialSoftmax), accepted
+    only for a uniform ObsEncoder signature.
     """
 
     def __init__(
