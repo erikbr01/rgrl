@@ -420,6 +420,17 @@ def _train(
 
     resolved_config = dataclasses.asdict(recipe)
 
+    # The raw Hydra `policy` node only carries keys that some YAML set; fields
+    # left at their policy-dataclass default (e.g. pretrained_backbone) are
+    # absent, so config.json under-describes the run. Fill those gaps from the
+    # constructed policy's cfg (setdefault keeps the Hydra representation, e.g.
+    # the data_transforms list, for keys that are present).
+    logged_policy_cfg = dict(policy_cfg)
+    policy_dc = getattr(policy, "cfg", None)
+    if dataclasses.is_dataclass(policy_dc):
+        for f in dataclasses.fields(policy_dc):
+            logged_policy_cfg.setdefault(f.name, getattr(policy_dc, f.name))
+
     def full_config() -> dict:
         # Facts derived at train time that are not in the raw Hydra tree but
         # that a self-contained checkpoint and a faithful run record need:
@@ -433,7 +444,7 @@ def _train(
             "resolved_training": resolved_config,
             "store": store_cfg,
             "target": target_cfg,
-            "policy": policy_cfg,
+            "policy": logged_policy_cfg,
             "sampling": sampling_cfg,
             "env_meta": store.meta.env_meta,
         }
