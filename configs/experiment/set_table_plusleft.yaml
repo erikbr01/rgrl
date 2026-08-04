@@ -9,5 +9,8 @@ defaults:
 training:
   wandb_project: set-table-droid
   wandb_name: set_table_plusleft_dit
+  # batch 256 (same as prepare_tray); fits a 24GB 4090 now that the DROID
+  # recipe keeps the store in host RAM (training/droid data_mode=shared_memory).
+  batch_size: 256
 
 out: runs/set_table_plusleft_dit

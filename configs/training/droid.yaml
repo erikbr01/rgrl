@@ -1,18 +1,21 @@
 # DROID DiT flow recipe (set_table / prepare_tray baselines).
 #
-# batch_size 128 (with the default lr 1e-4): the largest that fits a 24 GB 4090
-# now that the baselines train on two cameras (wrist_image_left + exterior)
-# rather than three -- 160/192/256 all OOM (measured). 2x the old batch 64.
-# The data path is auto (CPU/shared-host gathers with pinned H2D on a side
-# stream) with a single producer thread -- workers=0 beats multiprocessing
-# large image batches (IPC/contention). 300k optimizer steps is the baseline
-# budget; save a checkpoint every 100k.
+# data_mode shared_memory: keep the store in host RAM (CPU/shared-host gathers
+# with pinned H2D on a side stream, single producer thread -- workers=0 beats
+# multiprocessing for large image batches: IPC/contention). This is the DROID
+# default rather than `auto` because auto would cache a store that fits fully
+# on the GPU (cuda_resident), which eats ~15 GB VRAM for the larger stores and
+# leaves no room for batch 256 -- keeping the store off-GPU is what lets batch
+# 256 fit a 24 GB 4090 at two cameras. The old resident-only ceiling was batch
+# 128; experiments now set batch_size: 256 (see the prepare_tray/set_table
+# experiment configs). 300k optimizer steps is the baseline budget; save every
+# 100k. lr stays the default 1e-4.
 defaults:
   - default
   - _self_
 
 batch_size: 128
-data_mode: auto
+data_mode: shared_memory
 dataloader_workers: 0
 steps: 300000
 save_every: 100000
