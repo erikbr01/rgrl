@@ -6,6 +6,7 @@ defaults:
   - dit_flow
   - _self_
 
+# pretrained_backbone + image_norm=imagenet are inherited from dit_flow.
 data_transforms:
   - _target_: rgrl.transforms.CropTransform
     _partial_: true  # image_keys is bound by ObsEncoder once the store loads

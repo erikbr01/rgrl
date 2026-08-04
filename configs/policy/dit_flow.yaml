@@ -15,6 +15,12 @@ num_kp: 32
 # This reduces parameters/optimizer state, but is not checkpoint-compatible
 # with the default per-camera encoders and should be ablated before rollout.
 share_image_encoder: false
+# Vision backbone: ImageNet-pretrained (true) vs random init. Keep true --
+# a random-init backbone is badly data-starved on small demo sets. image_norm
+# is the input normalization applied to the [0,1] images; "imagenet" is the
+# default to match the pretrained weights' training distribution.
+pretrained_backbone: true
+image_norm: imagenet  # unit | neg_one_one | imagenet
 data_transforms:
   - _target_: rgrl.transforms.CropTransform
     _partial_: true  # image_keys, unknown until the store loads, is bound by ObsEncoder

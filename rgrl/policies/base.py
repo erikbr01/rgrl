@@ -47,6 +47,8 @@ class ObsEncoder(nn.Module):
         target_hw: tuple[int, int] | None = None,
         num_kp: int = 32,
         share_image_encoder: bool = False,
+        pretrained: bool = True,
+        image_norm: str = "imagenet",
     ):
         super().__init__()
         self.obs_horizon = obs_horizon
@@ -76,12 +78,16 @@ class ObsEncoder(nn.Module):
         self.encoders = nn.ModuleDict()
         feat_dim = 0
         if self.image_keys and share_image_encoder:
-            self.shared_encoder = ResNet18Encoder(target_hw, num_kp=num_kp)
+            self.shared_encoder = ResNet18Encoder(
+                target_hw, num_kp=num_kp, pretrained=pretrained, image_norm=image_norm
+            )
             feat_dim = len(self.image_keys) * self.shared_encoder.out_dim
         else:
             self.shared_encoder = None
             for k in self.image_keys:
-                enc = ResNet18Encoder(target_hw, num_kp=num_kp)
+                enc = ResNet18Encoder(
+                    target_hw, num_kp=num_kp, pretrained=pretrained, image_norm=image_norm
+                )
                 self.encoders[k.replace(".", "_")] = enc
                 feat_dim += enc.out_dim
 
