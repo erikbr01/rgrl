@@ -1,0 +1,11 @@
+# DROID DiT flow with a pretrained DINOv2 ViT-S/14 backbone (timm), ImageNet
+# norm, images resized to vit_img_size. Per-camera encoders -> two ViT-S.
+defaults:
+  - dit_flow_droid
+  - _self_
+
+backbone: vit_small_patch14_dinov2.lvd142m
+pretrained_backbone: true
+image_norm: imagenet
+vit_img_size: 224
+frozen_backbone: false

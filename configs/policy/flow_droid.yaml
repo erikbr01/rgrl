@@ -1,0 +1,15 @@
+# DROID flow (UNet): base flow, but the vision encoder runs at the 160x288
+# crop DROID images use (vs the robomimic 76x76 default). Camera-weight sharing
+# stays opt-in (share_image_encoder inherited false); ablate with
+# policy.share_image_encoder=true on the command line.
+defaults:
+  - flow
+  - _self_
+
+# pretrained_backbone + image_norm=imagenet are inherited from flow.
+data_transforms:
+  - _target_: rgrl.transforms.CropTransform
+    _partial_: true  # image_keys is bound by ObsEncoder once the store loads
+    size: [160, 288]
+    pad: 0
+    per_timestep: true
