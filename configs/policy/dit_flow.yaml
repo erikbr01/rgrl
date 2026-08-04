@@ -17,7 +17,8 @@ num_kp: 32
 share_image_encoder: false
 # Vision backbone: "resnet18" (torchvision ResNet18 + SpatialSoftmax) or any
 # timm model name (e.g. "vit_small_patch14_dinov2.lvd142m"). Pretrained by
-# default; image_norm should be "imagenet" whenever the backbone is pretrained.
+# default -- random init is badly data-starved on small demo sets; pair with
+# image_norm=imagenet to match the pretrained weights' distribution.
 backbone: resnet18
 pretrained_backbone: true
 image_norm: imagenet  # unit | neg_one_one | imagenet

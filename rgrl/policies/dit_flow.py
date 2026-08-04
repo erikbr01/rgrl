@@ -45,7 +45,8 @@ class DiTFlowConfig:
     # other name is a timm model (e.g. "vit_small_patch14_dinov2.lvd142m").
     backbone: str = "resnet18"
     # Pretrained by default: a random-init backbone is badly data-starved on
-    # small demo sets. Pair with image_norm=imagenet.
+    # small demo sets (it silently tanked DROID real-robot perf). Pair with
+    # image_norm=imagenet.
     pretrained_backbone: bool = True
     image_norm: str = "imagenet"  # unit | neg_one_one | imagenet (encoders.IMAGE_NORM_STATS)
     vit_img_size: int = 224   # square input a patch-based (timm) backbone is resized to

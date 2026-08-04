@@ -77,6 +77,13 @@ class TrainConfig:
     # an intentional state transition and requires ``extend``.
     resume: str = "auto"  # never | auto | required | extend
     resume_allow_legacy: bool = False
+    # Bypass the resume fingerprint equality check and continue from the full
+    # checkpoint state (model/EMA/optimizer/scheduler/RNG) even when the recipe
+    # fingerprint differs. Only safe when the model architecture and data are
+    # effectively unchanged and the mismatch is cosmetic (e.g. a store rebuilt
+    # at a new path with a re-pinned selection sha256). Unlike resume_allow_legacy
+    # this is a full-state resume, not a weights-only one.
+    resume_ignore_fingerprint: bool = False
 
     # In auto mode, this is an operator-provided ceiling in addition to the
     # live free-VRAM/state/reserve fit check. It is retained under its legacy
@@ -202,6 +209,7 @@ def _resume_spec(
         "save_every",
         "resume",
         "resume_allow_legacy",
+        "resume_ignore_fingerprint",
         "compile_mode",
         "wandb_project",
         "wandb_name",
@@ -420,6 +428,17 @@ def _train(
 
     resolved_config = dataclasses.asdict(recipe)
 
+    # The raw Hydra `policy` node only carries keys that some YAML set; fields
+    # left at their policy-dataclass default (e.g. pretrained_backbone) are
+    # absent, so config.json under-describes the run. Fill those gaps from the
+    # constructed policy's cfg (setdefault keeps the Hydra representation, e.g.
+    # the data_transforms list, for keys that are present).
+    logged_policy_cfg = dict(policy_cfg)
+    policy_dc = getattr(policy, "cfg", None)
+    if dataclasses.is_dataclass(policy_dc):
+        for f in dataclasses.fields(policy_dc):
+            logged_policy_cfg.setdefault(f.name, getattr(policy_dc, f.name))
+
     def full_config() -> dict:
         # Facts derived at train time that are not in the raw Hydra tree but
         # that a self-contained checkpoint and a faithful run record need:
@@ -433,7 +452,7 @@ def _train(
             "resolved_training": resolved_config,
             "store": store_cfg,
             "target": target_cfg,
-            "policy": policy_cfg,
+            "policy": logged_policy_cfg,
             "sampling": sampling_cfg,
             "env_meta": store.meta.env_meta,
         }
@@ -489,9 +508,18 @@ def _train(
             legacy_resume = True
             log.warning("resuming legacy weights/EMA only; continuation is not exact")
         elif checkpoint.get("resume_fingerprint") != resume_fingerprint:
-            raise RuntimeError(
-                "checkpoint is incompatible with the current data/policy/optimizer "
-                "recipe (resume fingerprint mismatch)"
+            if not cfg.resume_ignore_fingerprint:
+                raise RuntimeError(
+                    "checkpoint is incompatible with the current data/policy/optimizer "
+                    "recipe (resume fingerprint mismatch); set "
+                    "training.resume_ignore_fingerprint=true to continue from the full "
+                    "checkpoint state anyway (only safe when the model and data are "
+                    "unchanged and the mismatch is cosmetic)"
+                )
+            log.warning(
+                "resume fingerprint mismatch ignored (resume_ignore_fingerprint=true); "
+                "continuing from full checkpoint state -- only correct when the model "
+                "architecture and training data are effectively unchanged"
             )
 
         policy.load_state_dict(checkpoint["model"])

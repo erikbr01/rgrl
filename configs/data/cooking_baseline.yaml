@@ -1,0 +1,40 @@
+name: cooking_baseline
+# Cooking store rebuilt locally from the raw SVOs (success 2026-07-27 + 2026-07-28,
+# 121 episodes) with policy_graphs' convert_droid_data.py + trim_droid_idle_beginnings.py,
+# mirroring the original GCP build recipe (3 cameras physically; joint_velocity;
+# 180x320; fps15; crf23). The baseline trains on a single wrist camera
+# (wrist_image_left) + the exterior view; shape_meta below selects the subset.
+store_path: ${oc.env:RGRL_DATA_ROOT,/mnt/ssdB/erik}/droid_converted_cooking_all_trimmed
+dataset_id: droid_cooking_all_trimmed
+abs_action: false
+rename: {}
+# Seed-42 draw of 120 "cooking" episodes. expected_sha256 pins the resolved
+# episode-id set against silent drift. The local rebuild is deterministic:
+# it reproduced the original GCP store's episode ordering exactly, so this
+# hash is identical to the one the 300k baseline checkpoint trained against
+# -- i.e. verifiably the same 120 episodes.
+selection:
+  seed: 42
+  select:
+    - task: "cooking"
+      count: 120
+  count: 120
+  expected_sha256: "e072494c3f172867a658b04d8a60fb319aec7de0eaf0a920d2e7ba49b776af9b"
+shape_meta:
+  obs:
+    wrist_image_left:
+      shape: [180, 320, 3]
+      type: rgb
+      channel_order: rgb
+    exterior_image_1_left:
+      shape: [180, 320, 3]
+      type: rgb
+      channel_order: rgb
+    joint_positions:
+      shape: [7]
+      type: low_dim
+    gripper_position:
+      shape: [1]
+      type: low_dim
+  action:
+    shape: [8]
