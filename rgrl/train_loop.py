@@ -77,6 +77,13 @@ class TrainConfig:
     # an intentional state transition and requires ``extend``.
     resume: str = "auto"  # never | auto | required | extend
     resume_allow_legacy: bool = False
+    # Bypass the resume fingerprint equality check and continue from the full
+    # checkpoint state (model/EMA/optimizer/scheduler/RNG) even when the recipe
+    # fingerprint differs. Only safe when the model architecture and data are
+    # effectively unchanged and the mismatch is cosmetic (e.g. a store rebuilt
+    # at a new path with a re-pinned selection sha256). Unlike resume_allow_legacy
+    # this is a full-state resume, not a weights-only one.
+    resume_ignore_fingerprint: bool = False
 
     # In auto mode, this is an operator-provided ceiling in addition to the
     # live free-VRAM/state/reserve fit check. It is retained under its legacy
@@ -202,6 +209,7 @@ def _resume_spec(
         "save_every",
         "resume",
         "resume_allow_legacy",
+        "resume_ignore_fingerprint",
         "compile_mode",
         "wandb_project",
         "wandb_name",
@@ -500,9 +508,18 @@ def _train(
             legacy_resume = True
             log.warning("resuming legacy weights/EMA only; continuation is not exact")
         elif checkpoint.get("resume_fingerprint") != resume_fingerprint:
-            raise RuntimeError(
-                "checkpoint is incompatible with the current data/policy/optimizer "
-                "recipe (resume fingerprint mismatch)"
+            if not cfg.resume_ignore_fingerprint:
+                raise RuntimeError(
+                    "checkpoint is incompatible with the current data/policy/optimizer "
+                    "recipe (resume fingerprint mismatch); set "
+                    "training.resume_ignore_fingerprint=true to continue from the full "
+                    "checkpoint state anyway (only safe when the model and data are "
+                    "unchanged and the mismatch is cosmetic)"
+                )
+            log.warning(
+                "resume fingerprint mismatch ignored (resume_ignore_fingerprint=true); "
+                "continuing from full checkpoint state -- only correct when the model "
+                "architecture and training data are effectively unchanged"
             )
 
         policy.load_state_dict(checkpoint["model"])

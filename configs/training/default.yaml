@@ -14,6 +14,7 @@ log_every: 100
 save_every: 10000
 resume: auto
 resume_allow_legacy: false
+resume_ignore_fingerprint: false
 pin_fallback_gb: 20.0
 dataloader_workers: 0
 data_mode: auto
