@@ -90,7 +90,20 @@ class TrainConfig:
     # name for config compatibility.
     pin_fallback_gb: float = 20.0
     dataloader_workers: int = 0
-    data_mode: str = "auto"  # auto | cuda_resident | shared_memory
+    data_mode: str = "auto"  # auto | cuda_resident | shared_memory | disk
+    # DataLoader batches decoded ahead of consumption per worker, when
+    # data_mode uses one (shared_memory/disk); ignored for cuda_resident and
+    # for auto when it resolves to cuda_resident. Higher values hide more
+    # disk/decode latency behind the GPU step at the cost of more host RAM
+    # for in-flight batches -- relevant mainly for data_mode=disk, where
+    # dataloader_workers should also be > 0 for this to do anything.
+    prefetch_factor: int = 4
+    # data_mode=disk only: per-process cap on DiskSequenceDataset's video
+    # decoder cache (shared across image keys). Should cover the full
+    # episodes x image-keys working set to avoid eviction thrashing once
+    # warm -- e.g. 450 comfortably covers a 200-episode/2-camera selection.
+    # Ignored by every other data_mode.
+    max_decoders: int = 450
     device_memory_reserve_gb: float = 4.0
 
     compile: bool = True
@@ -218,6 +231,8 @@ def _resume_spec(
         "pin_fallback_gb",
         "dataloader_workers",
         "data_mode",
+        "prefetch_factor",
+        "max_decoders",
         "device_memory_reserve_gb",
     }:
         training.pop(key, None)
@@ -392,6 +407,7 @@ def _train(
         data_mode=cfg.data_mode,
         device_memory_reserve_gb=cfg.device_memory_reserve_gb,
         model_state_bytes=model_state_bytes,
+        max_decoders=cfg.max_decoders,
     )
     val = (
         build_dataset(
@@ -405,6 +421,7 @@ def _train(
             data_mode=cfg.data_mode,
             device_memory_reserve_gb=cfg.device_memory_reserve_gb,
             model_state_bytes=model_state_bytes,
+            max_decoders=cfg.max_decoders,
         )
         if cfg.val_episodes
         else None
@@ -645,7 +662,9 @@ def _train(
     loss_count = 0
     t_log = time.perf_counter()
     policy.train()
-    batches = data.batches(cfg.batch_size, cfg.seed, start_batch=start_step)
+    batches = data.batches(
+        cfg.batch_size, cfg.seed, start_batch=start_step, prefetch_factor=cfg.prefetch_factor
+    )
 
     def one_step(step: int) -> None:
         nonlocal loss_sum, loss_count

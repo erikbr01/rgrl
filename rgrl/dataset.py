@@ -27,6 +27,8 @@ checkpoint can resume at the exact next batch without serializing a DataLoader.
 from __future__ import annotations
 
 import logging
+import os
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 import numpy as np
@@ -278,14 +280,19 @@ class GpuSequenceDataset:
         batch["action"] = take(self.tensors["action"], act_f)
         return batch
 
-    def batches(self, batch_size: int, seed: int, start_batch: int = 0):
+    def batches(self, batch_size: int, seed: int, start_batch: int = 0, prefetch_factor: int = 4):
         """Infinite iterator of batches; epoch-shuffled, drop-last.
 
         The permutation is generated on CPU (reproducible across machines) but
         moved to the GPU once per epoch: slicing it device-side keeps the hot
         loop free of pageable H2D copies, which would drain the CUDA pipeline
         every step.
+
+        ``prefetch_factor`` is accepted but unused -- this mode has no
+        DataLoader (everything is already resident), kept only for call-site
+        parity with Cpu/DiskSequenceDataset.
         """
+        del prefetch_factor
         if start_batch < 0:
             raise ValueError(f"start_batch must be >= 0, got {start_batch}")
         batches_per_epoch = _batches_per_epoch(self.num_samples, batch_size)
@@ -397,7 +404,7 @@ class CpuSequenceDataset(torch.utils.data.Dataset):
     def epoch_perm(self, seed: int, epoch: int) -> torch.Tensor:
         return _epoch_sample_ids(self.num_samples, self.sample_weights, seed, epoch)
 
-    def batches(self, batch_size: int, seed: int, start_batch: int = 0):
+    def batches(self, batch_size: int, seed: int, start_batch: int = 0, prefetch_factor: int = 4):
         """Infinite deterministic, drop-last DataLoader batches.
 
         The main process owns the batch sampler, so worker scheduling cannot
@@ -423,6 +430,278 @@ class CpuSequenceDataset(torch.utils.data.Dataset):
             pin_memory=self.device.type == "cuda",
             persistent_workers=self.num_workers > 0,
             multiprocessing_context="spawn" if self.num_workers > 0 else None,
+            prefetch_factor=prefetch_factor if self.num_workers > 0 else None,
+            generator=worker_generator,
+            collate_fn=_identity,
+        )
+        from robo_dataset.prefetch import DataPrefetcher
+
+        yield from DataPrefetcher(loader, device=self.device)
+
+
+class DiskSequenceDataset(torch.utils.data.Dataset):
+    """Like CpuSequenceDataset, but image keys are decoded on demand per
+    sample instead of being materialized into host RAM up front -- for a
+    split whose images don't fit CpuSequenceDataset's full-copy either
+    (e.g. a video-backed DROID store too large for this box's RAM). Low-dim
+    keys (state + action) are still preloaded: their footprint is
+    negligible next to images, and they're needed synchronously either way.
+
+    Each sample's obs-horizon window is, by construction of `_windows_index_
+    table`'s clamping, a contiguous frame range within a single episode.
+    `_decode_image_batch` groups a batch's rows by episode and, per group,
+    either fetches the union of their windows in one call (cheap when
+    they're close together) or each row's own small window individually
+    (when the union would span far more than what's needed -- under true
+    random sampling over a small episode count, a few rows from the same
+    ~700-frame episode landing at opposite ends of it is common, and a
+    naive union fetch there means decoding hundreds of unneeded frames per
+    group). DataLoader worker processes provide the prefetch depth
+    (`num_workers` x `prefetch_factor` batches decoded ahead of the
+    training step); a store handle is never pickled to a worker (see
+    `__getstate__`) -- each process opens its own on first access, since
+    robo_dataset's video decoder keeps a per-process cache and isn't
+    guaranteed spawn-picklable while holding it open.
+
+    That per-process reopen explicitly bounds the decoder cache
+    (`max_decoders`) rather than accepting EpisodeStore's auto-sized
+    default: `max_decoders` should cover the full episodes x image-keys
+    working set so decoders never get evicted once warm (measured ~30%
+    faster than an undersized cache) -- eviction thrashing is a real cost
+    once each individual fetch is small, not the dominant one it looked
+    like before the union-range fix above. Per-batch decode is further
+    fanned out across a small persistent thread pool (see `_pool`) --
+    empirically 4 threads beat both no threading and 16 (which
+    oversubscribes against several worker *processes* already providing
+    real parallelism).
+    """
+
+    def __init__(
+        self,
+        store: EpisodeStore,
+        windows: Windows,
+        device: torch.device,
+        val_episodes: int = 0,
+        val_split: str = "train",
+        num_workers: int = 1,
+        sample_weights: torch.Tensor | None = None,
+        max_decoders: int = 450,
+    ):
+        self.device = device
+        self.data_device = torch.device("cpu")
+        self.num_workers = num_workers
+        self.max_decoders = max_decoders
+        self._store_path = str(store.path)
+        self._shape_meta = store.shape_meta_dict()
+        self._proc_store = store
+        self._store_pid = os.getpid()
+
+        ep_lo, ep_hi = _split_episode_range(store, val_episodes, val_split)
+        self.ep_lo = ep_lo
+        bounds = _split_bounds(store, ep_lo, ep_hi)
+        self.image_keys = [k for k, s in store.meta.keys.items() if s.kind == KIND_IMAGE]
+        self.state_keys = [k for k, s in store.meta.keys.items() if s.kind == "state"]
+
+        # Split-local frame -> (global episode id, 0-based local offset in
+        # that episode) -- what EpisodeStore.get_frames expects. Precomputed
+        # once here rather than per-sample.
+        lengths = (bounds[:, 1] - bounds[:, 0]).astype(np.int64)
+        self._frame_episode = np.repeat(np.arange(ep_lo, ep_hi, dtype=np.int64), lengths)
+        self._frame_local = np.arange(int(lengths.sum()), dtype=np.int64) - np.repeat(
+            bounds[:, 0], lengths
+        )
+
+        # Cheap keys stay fully resident -- only images are lazy.
+        self.tensors: dict[str, torch.Tensor] = {}
+        for key in [*self.state_keys, "action"]:
+            t = torch.from_numpy(store.load(key, episode_range=(ep_lo, ep_hi)))
+            if self.num_workers > 0:
+                t.share_memory_()
+            self.tensors[key] = t
+
+        self.obs_idx, self.act_idx, self.act_pad = _windows_index_table(bounds, windows)
+        self.num_samples = len(self.obs_idx)
+        if self.num_samples == 0:
+            raise ValueError(f"{val_split} split contains no window samples")
+        self.sample_weights = _split_sample_weights(
+            store, ep_lo, ep_hi, sample_weights, val_split
+        )
+
+        # Never keep using the caller's store instance past construction --
+        # it was opened with whatever max_decoders the caller chose (likely
+        # EpisodeStore's unbounded-working-set default), not this class's
+        # bound. The next _store() call, in this process or any worker's,
+        # reopens fresh with max_decoders applied.
+        self._proc_store = None
+        self._store_pid = None
+        self._decode_pool: ThreadPoolExecutor | None = None
+        self._decode_pool_pid: int | None = None
+
+    def __getstate__(self) -> dict:
+        # Never pickle an open store handle or thread pool to a spawned
+        # worker -- see the class docstring. Each process opens its own
+        # lazily instead.
+        state = self.__dict__.copy()
+        state["_proc_store"] = None
+        state["_store_pid"] = None
+        state["_decode_pool"] = None
+        state["_decode_pool_pid"] = None
+        return state
+
+    def _store(self) -> EpisodeStore:
+        pid = os.getpid()
+        if self._proc_store is None or self._store_pid != pid:
+            self._proc_store = EpisodeStore(
+                self._store_path, self._shape_meta, max_decoders=self.max_decoders
+            )
+            self._store_pid = pid
+        return self._proc_store
+
+    def _pool(self) -> ThreadPoolExecutor:
+        # One persistent pool per process, reused across every batch --
+        # spinning up a fresh ThreadPoolExecutor (and therefore fresh OS
+        # threads) on every _decode_image_batch call caused RSS to climb
+        # steadily and never come back down (glibc malloc-arena bloat from
+        # constant thread churn, each new thread able to claim its own
+        # arena), even though decoder count and Python-level references
+        # stayed bounded.
+        #
+        # max_workers=4 is itself a measured choice, not a guess: with
+        # several DataLoader worker *processes* already running in true
+        # parallel, a large intra-process pool (16 was the original value)
+        # oversubscribes the box's cores and adds sys-time from contention
+        # rather than more real decode throughput. 4 measured faster than
+        # both 1 (no threading) and 16 at dataloader_workers=8.
+        pid = os.getpid()
+        if self._decode_pool is None or self._decode_pool_pid != pid:
+            self._decode_pool = ThreadPoolExecutor(max_workers=4)
+            self._decode_pool_pid = pid
+        return self._decode_pool
+
+    def __len__(self) -> int:
+        return self.num_samples
+
+    def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
+        return self._gather_cpu(torch.as_tensor([idx], dtype=torch.int64))
+
+    def __getitems__(self, sample_ids: list[int]) -> dict[str, torch.Tensor]:
+        return self._gather_cpu(torch.as_tensor(sample_ids, dtype=torch.int64))
+
+    def _decode_image_batch(self, key: str, obs_f: torch.Tensor) -> torch.Tensor:
+        """obs_f: (B, obs_horizon) split-local frame indices, each row
+        monotonic non-decreasing and confined to one episode. Fetches the
+        minimal contiguous range per row and re-indexes for any boundary
+        clamping (repeated frame indices near an episode's start).
+
+        Rows are grouped by episode and fetched with one call per unique
+        episode (covering the union of every row's window in that episode)
+        rather than one call per row: robo_dataset's per-(key, episode)
+        video decoder documents thread-safety only *across* distinct
+        episodes, not for two threads concurrently seeking/decoding the same
+        one -- with batch_size often exceeding the episode count, per-row
+        fan-out reliably put multiple rows on the same decoder at once and
+        corrupted the frames returned."""
+        obs_np = obs_f.numpy()
+        lo = obs_np.min(axis=1)
+        hi = obs_np.max(axis=1) + 1
+        episodes = self._frame_episode[lo]
+        local_lo = self._frame_local[lo]
+        local_hi = local_lo + (hi - lo)
+        store = self._store()
+
+        by_episode: dict[int, list[int]] = {}
+        for row in range(len(obs_np)):
+            by_episode.setdefault(int(episodes[row]), []).append(row)
+
+        def fetch_group(item: tuple[int, list[int]]) -> list[tuple[int, np.ndarray]]:
+            # A batch under true random sampling can draw several rows from
+            # the same episode at far-apart timesteps (episodes here run
+            # ~700+ frames) -- fetching their union range then decoded
+            # thousands of unneeded frames to serve a handful of actual
+            # samples (measured: one batch needed 512 frames total but the
+            # naive union-per-episode fetch decoded 22,640 -- the entire
+            # earlier throughput problem). Only take the union when it's
+            # close to what's actually needed; otherwise fetch each row's
+            # own small window individually. Both branches stay within this
+            # one task, so per-(key, episode) decoder access is still never
+            # touched by two threads at once.
+            ep, rows = item
+            g_lo = int(local_lo[rows].min())
+            g_hi = int(local_hi[rows].max())
+            needed = int(sum(local_hi[r] - local_lo[r] for r in rows))
+            out = []
+            if g_hi - g_lo <= max(needed * 3, 8):
+                arr = store.get_frames(key, ep, g_lo, g_hi)
+                for r in rows:
+                    abs_local = local_lo[r] + (obs_np[r] - lo[r])
+                    out.append((r, arr[abs_local - g_lo]))
+            else:
+                cache: dict[tuple[int, int], np.ndarray] = {}
+                for r in rows:
+                    r_lo, r_hi = int(local_lo[r]), int(local_hi[r])
+                    if (r_lo, r_hi) not in cache:
+                        cache[(r_lo, r_hi)] = store.get_frames(key, ep, r_lo, r_hi)
+                    abs_local = local_lo[r] + (obs_np[r] - lo[r])
+                    out.append((r, cache[(r_lo, r_hi)][abs_local - r_lo]))
+            return out
+
+        rows_out: list[np.ndarray | None] = [None] * len(obs_np)
+        for group_results in self._pool().map(fetch_group, by_episode.items()):
+            for r, val in group_results:
+                rows_out[r] = val
+        return torch.from_numpy(np.stack(rows_out, axis=0))
+
+    def _gather_cpu(self, sample_ids: torch.Tensor) -> dict[str, torch.Tensor]:
+        obs_f = self.obs_idx[sample_ids]
+        act_f = self.act_idx[sample_ids]
+        batch: dict[str, torch.Tensor] = {"action_is_pad": self.act_pad[sample_ids]}
+
+        def take(src: torch.Tensor, idx: torch.Tensor) -> torch.Tensor:
+            return src[idx.reshape(-1)].reshape(*idx.shape, *src.shape[1:])
+
+        for key in self.state_keys:
+            batch[key] = take(self.tensors[key], obs_f)
+        batch["action"] = take(self.tensors["action"], act_f)
+        for key in self.image_keys:
+            batch[key] = self._decode_image_batch(key, obs_f)
+        return batch
+
+    def gather(self, sample_ids: torch.Tensor) -> dict[str, torch.Tensor]:
+        """sample_ids: (B,) long tensor -> batch dict on self.device. Direct
+        synchronous CPU gather (decoding images in-process), no DataLoader --
+        used for val evaluation, a cold enough path that worker parallelism
+        isn't worth it."""
+        batch = self._gather_cpu(sample_ids.cpu())
+        return {
+            key: value.to(self.device, non_blocking=True)
+            for key, value in batch.items()
+        }
+
+    def epoch_perm(self, seed: int, epoch: int) -> torch.Tensor:
+        return _epoch_sample_ids(self.num_samples, self.sample_weights, seed, epoch)
+
+    def batches(self, batch_size: int, seed: int, start_batch: int = 0, prefetch_factor: int = 4):
+        """Infinite deterministic, drop-last DataLoader batches -- see
+        CpuSequenceDataset.batches. `prefetch_factor` batches per worker are
+        decoded ahead of consumption; raise it (and `num_workers`) to hide
+        more disk/decode latency behind the GPU step at the cost of more
+        host RAM for in-flight batches (small next to a resident copy)."""
+        batch_sampler = _InfiniteBatchSampler(
+            self.num_samples,
+            batch_size,
+            seed,
+            self.sample_weights,
+            start_batch,
+        )
+        worker_generator = torch.Generator().manual_seed(seed)
+        loader = torch.utils.data.DataLoader(
+            self,
+            batch_sampler=batch_sampler,
+            num_workers=self.num_workers,
+            pin_memory=self.device.type == "cuda",
+            persistent_workers=self.num_workers > 0,
+            multiprocessing_context="spawn" if self.num_workers > 0 else None,
+            prefetch_factor=prefetch_factor if self.num_workers > 0 else None,
             generator=worker_generator,
             collate_fn=_identity,
         )
@@ -443,23 +722,35 @@ def build_dataset(
     data_mode: str = "auto",
     device_memory_reserve_gb: float = 4.0,
     model_state_bytes: int = 0,
+    max_decoders: int = 450,
 ):
-    """The one place that picks GpuSequenceDataset vs. CpuSequenceDataset
-    for one split, sized to just that split's own frames (not the whole
-    store -- train and val must not each independently decide "the whole
-    store fits" and then both load a full copy).
+    """The one place that picks GpuSequenceDataset vs. CpuSequenceDataset vs.
+    DiskSequenceDataset for one split, sized to just that split's own frames
+    (not the whole store -- train and val must not each independently decide
+    "the whole store fits" and then both load a full copy).
 
     In ``auto`` mode both the configured size ceiling and current free VRAM
     are considered. ``device_memory_reserve_gb`` leaves room for activations
     and compiler workspaces; ``model_state_bytes`` accounts for the policy,
-    gradients, EMA, and optimizer estimate supplied by the trainer."""
-    if data_mode not in {"auto", "cuda_resident", "shared_memory"}:
+    gradients, EMA, and optimizer estimate supplied by the trainer.
+
+    ``data_mode="disk"`` is the explicit escape hatch for a split too large
+    for both VRAM and host RAM (auto/cuda_resident/shared_memory all
+    materialize the whole split resident somewhere): images are decoded per
+    sample from the on-disk store instead, via DiskSequenceDataset. It is
+    never chosen automatically -- pass it explicitly."""
+    if data_mode not in {"auto", "cuda_resident", "shared_memory", "disk"}:
         raise ValueError(
-            "data_mode must be auto, cuda_resident, or shared_memory; "
+            "data_mode must be auto, cuda_resident, shared_memory, or disk; "
             f"got {data_mode!r}"
         )
     if device_memory_reserve_gb < 0:
         raise ValueError("device_memory_reserve_gb must be >= 0")
+    if data_mode == "disk":
+        return DiskSequenceDataset(
+            store, windows, device, val_episodes, val_split, dataloader_workers, sample_weights,
+            max_decoders=max_decoders,
+        )
     ep_lo, ep_hi = _split_episode_range(store, val_episodes, val_split)
     bounds = _split_bounds(store, ep_lo, ep_hi)
     n_frames = int(bounds[-1][1]) if len(bounds) else 0

@@ -91,9 +91,19 @@ class EpisodeStore:
     xyzw; a real-robot or ROS-sourced dataset may not).
     """
 
-    def __init__(self, path: str | Path, shape_meta: dict):
+    def __init__(self, path: str | Path, shape_meta: dict, max_decoders: int | None = None):
         self.path = Path(path)
-        self._robo = open_store(str(self.path))
+        # max_decoders bounds a video-backed store's per-process LRU decoder
+        # cache (forwarded only when given -- the default auto-sizes to the
+        # whole episode x video-key working set, fine for a one-shot bulk
+        # decode but not for a store repeatedly opened/reopened for on-demand
+        # per-sample access, e.g. DiskSequenceDataset, where that many
+        # simultaneously open decoders each carry their own native decode
+        # resources). Non-video backends don't accept the kwarg, so it's
+        # only added when a caller actually asks for it.
+        self._robo = open_store(
+            str(self.path), **({"max_decoders": max_decoders} if max_decoders is not None else {})
+        )
         view_path = self.path / EPISODE_VIEW_FILE
         self.episode_ids: tuple[int, ...] | None = None
         if view_path.exists():
@@ -195,11 +205,40 @@ class EpisodeStore:
             )
         return np.ascontiguousarray(np.concatenate(parts, axis=0))
 
+    def get_frames(self, key: str, episode_idx: int, start: int, end: int) -> np.ndarray:
+        """Decode/read one episode's local frame range [start, end) for one
+        key, without touching any other episode -- unlike `load`, does not
+        aggregate across episodes. For on-demand access to a single sample's
+        window (e.g. DiskSequenceDataset's per-sample obs horizon) so a split
+        that doesn't fit resident never needs a full in-memory copy."""
+        return np.ascontiguousarray(self._robo.get_frames(episode_idx, key, start, end))
+
     def episode_bounds(self) -> np.ndarray:
         """(num_episodes, 2) array of [start, end) frame indices."""
         ends = np.asarray(self.meta.episode_ends, dtype=np.int64)
         starts = np.concatenate([[0], ends[:-1]])
         return np.stack([starts, ends], axis=1)
+
+    def shape_meta_dict(self) -> dict:
+        """Reconstruct an equivalent shape_meta from `self.meta.keys` -- the
+        inverse of `_checked_key_spec`. Lets a fresh EpisodeStore be reopened
+        against the same on-disk path (e.g. one private handle per
+        DataLoader worker process) without threading the original config's
+        shape_meta dict through to the reopening site."""
+        obs = {}
+        for key, spec in self.meta.keys.items():
+            if key == "action":
+                continue
+            entry: dict = {
+                "shape": list(spec.shape),
+                "type": "rgb" if spec.kind == KIND_IMAGE else "low_dim",
+            }
+            if spec.channel_order is not None:
+                entry["channel_order"] = spec.channel_order
+            if spec.quat_convention is not None:
+                entry["quat_convention"] = spec.quat_convention
+            obs[key] = entry
+        return {"obs": obs, "action": {"shape": list(self.meta.keys["action"].shape)}}
 
     def nbytes(self, n_frames: int | None = None) -> int:
         """Total bytes across every key for `n_frames` frames (default: the

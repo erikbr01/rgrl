@@ -18,6 +18,8 @@ resume_ignore_fingerprint: false
 pin_fallback_gb: 20.0
 dataloader_workers: 0
 data_mode: auto
+prefetch_factor: 4
+max_decoders: 450
 device_memory_reserve_gb: 4.0
 compile: true
 # compile_mode: default        # previous default (fast compile, no autotuning)
