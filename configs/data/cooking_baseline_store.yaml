@@ -1,5 +1,5 @@
-# Shared spec for the cooking_baseline family (baseline / corn / carrot / lid
-# and the corn_carrot / corn_lid / carrot_lid pairs). Those variants differ
+# Shared spec for the cooking_baseline family (baseline / corn / carrot /
+# lid). Those variants differ
 # only in name + selection; store_path, dataset_id, abs_action, rename, and
 # shape_meta are identical and defined once here. Not selectable on its own
 # (no name/selection) -- pick a concrete variant with data=cooking_baseline*,
