@@ -1,0 +1,11 @@
+# shape_meta the policy consumes for the sim-bottles task (see data/sim_bottles.yaml).
+obs:
+  top_camera-images-rgb:
+    shape: [480, 640, 3]
+    type: rgb
+    channel_order: rgb
+  state:
+    shape: [14]
+    type: low_dim
+action:
+  shape: [14]
