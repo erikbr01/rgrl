@@ -27,7 +27,11 @@ from pathlib import Path
 
 import numpy as np
 
-from robo_dataset.store_factory import open_store
+from robo_dataset.store_factory import detect_format, open_store
+
+# Backends whose constructor accepts max_decoders (they hold an LRU cache of
+# open video decoders). Every other backend raises TypeError on the kwarg.
+_DECODER_CACHE_FORMATS = {"video", "lerobot"}
 
 KIND_IMAGE = "image"
 KIND_STATE = "state"
@@ -91,9 +95,24 @@ class EpisodeStore:
     xyzw; a real-robot or ROS-sourced dataset may not).
     """
 
-    def __init__(self, path: str | Path, shape_meta: dict):
+    def __init__(self, path: str | Path, shape_meta: dict, max_decoders: int | None = None):
         self.path = Path(path)
-        self._robo = open_store(str(self.path))
+        # max_decoders bounds a video-backed store's per-process LRU decoder
+        # cache (the backend default auto-sizes to the whole episode x
+        # video-key working set, fine for a one-shot bulk decode but not for a
+        # store repeatedly opened/reopened for on-demand per-sample access,
+        # e.g. DiskSequenceDataset, where that many simultaneously open
+        # decoders each carry their own native decode resources).
+        #
+        # Gate on the resolved backend, not just on the caller passing a value:
+        # DiskSequenceDataset always passes one (its default is an int, never
+        # None), and non-video backends raise TypeError on the kwarg -- which
+        # would surface as a DataLoader-worker crash mid-run, since the store
+        # is reopened lazily per process.
+        forward_decoders = max_decoders is not None and detect_format(str(self.path)) in _DECODER_CACHE_FORMATS
+        self._robo = open_store(
+            str(self.path), **({"max_decoders": max_decoders} if forward_decoders else {})
+        )
         view_path = self.path / EPISODE_VIEW_FILE
         self.episode_ids: tuple[int, ...] | None = None
         if view_path.exists():
@@ -165,7 +184,7 @@ class EpisodeStore:
             quat_convention=quat_convention,
         )
 
-    def load(self, key: str, episode_range: tuple[int, int] | None = None) -> np.ndarray:
+    def load(self, key: str, episodes: np.ndarray | list[int] | None = None) -> np.ndarray:
         # Per-episode get_frames() calls, fanned out across threads, instead
         # of one sequential get_sequence() over the whole store: for a
         # video-backed store this is the difference between decoding on one
@@ -174,32 +193,65 @@ class EpisodeStore:
         # non-video backends too — a thread pool over near-free zarr reads
         # costs nothing.
         #
-        # episode_range: [lo, hi) episode indices to load, default the whole
-        # store — GpuSequenceDataset uses this so a train/val split loads
-        # only its own episodes' frames, not a full duplicate copy of the
-        # other split's (see its docstring).
-        lo, hi = (0, self.meta.num_episodes) if episode_range is None else episode_range
-        if hi - lo <= 1:
-            ends = self.meta.episode_ends
-            start = 0 if lo == 0 else ends[lo - 1]
-            end = start if hi <= lo else ends[lo]
-            return np.ascontiguousarray(self._robo.get_sequence(key, start, end))
+        # episodes: which episode indices to load, in order, default the whole
+        # store — the dataset classes use this so a train/val split loads only
+        # its own episodes' frames, not a full duplicate copy of the other
+        # split's. Need not be contiguous (val_selection=random).
+        eps = (
+            np.arange(self.meta.num_episodes, dtype=np.int64)
+            if episodes is None
+            else np.asarray(episodes, dtype=np.int64)
+        )
         ends = self.meta.episode_ends
         starts = [0] + ends[:-1]
-        with ThreadPoolExecutor(max_workers=min(16, hi - lo)) as pool:
+        if len(eps) == 0:
+            return np.ascontiguousarray(self._robo.get_sequence(key, 0, 0))
+        if len(eps) == 1:
+            i = int(eps[0])
+            return np.ascontiguousarray(self._robo.get_sequence(key, starts[i], ends[i]))
+        with ThreadPoolExecutor(max_workers=min(16, len(eps))) as pool:
             parts = list(
                 pool.map(
-                    lambda i: self._robo.get_frames(i, key, 0, ends[i] - starts[i]),
-                    range(lo, hi),
+                    lambda i: self._robo.get_frames(int(i), key, 0, ends[i] - starts[i]),
+                    eps,
                 )
             )
         return np.ascontiguousarray(np.concatenate(parts, axis=0))
+
+    def get_frames(self, key: str, episode_idx: int, start: int, end: int) -> np.ndarray:
+        """Decode/read one episode's local frame range [start, end) for one
+        key, without touching any other episode -- unlike `load`, does not
+        aggregate across episodes. For on-demand access to a single sample's
+        window (e.g. DiskSequenceDataset's per-sample obs horizon) so a split
+        that doesn't fit resident never needs a full in-memory copy."""
+        return np.ascontiguousarray(self._robo.get_frames(episode_idx, key, start, end))
 
     def episode_bounds(self) -> np.ndarray:
         """(num_episodes, 2) array of [start, end) frame indices."""
         ends = np.asarray(self.meta.episode_ends, dtype=np.int64)
         starts = np.concatenate([[0], ends[:-1]])
         return np.stack([starts, ends], axis=1)
+
+    def shape_meta_dict(self) -> dict:
+        """Reconstruct an equivalent shape_meta from `self.meta.keys` -- the
+        inverse of `_checked_key_spec`. Lets a fresh EpisodeStore be reopened
+        against the same on-disk path (e.g. one private handle per
+        DataLoader worker process) without threading the original config's
+        shape_meta dict through to the reopening site."""
+        obs = {}
+        for key, spec in self.meta.keys.items():
+            if key == "action":
+                continue
+            entry: dict = {
+                "shape": list(spec.shape),
+                "type": "rgb" if spec.kind == KIND_IMAGE else "low_dim",
+            }
+            if spec.channel_order is not None:
+                entry["channel_order"] = spec.channel_order
+            if spec.quat_convention is not None:
+                entry["quat_convention"] = spec.quat_convention
+            obs[key] = entry
+        return {"obs": obs, "action": {"shape": list(self.meta.keys["action"].shape)}}
 
     def nbytes(self, n_frames: int | None = None) -> int:
         """Total bytes across every key for `n_frames` frames (default: the

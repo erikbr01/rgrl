@@ -1,0 +1,18 @@
+defaults:
+  - _base/cooking_store@_here_
+  - _self_
+
+name: cooking_baseline_corn
+# Base cooking draw (seed 42, same as cooking_baseline) + a seeded draw of
+# 30 of the store's 36 "cooking - corn" episodes (see
+# fetch_droid_language_stats.py). expected_sha256 pins the resolved set --
+# run `python scripts/pin_selection.py data=cooking_baseline_corn` to
+# (re)compute it after any change.
+selection:
+  seed: 42
+  select:
+    - task: "cooking"
+      count: 200
+    - task: "cooking - corn"
+      count: 30
+  expected_sha256: "9b0e1f2105535e56861703dd88e545e2d349a76051372efe89ab6425b7f27c10"

@@ -28,9 +28,10 @@ current update without multiprocessing large image batches.
   the robo_dataset zarr store. `rgrl/convert_robomimic.py` streams a robomimic
   HDF5 dataset through it once (200-demo image dataset in ~7 s).
 - **Dataset** (`rgrl/dataset.py`): explicit `auto | cuda_resident |
-  shared_memory` placement; vectorized windowing and batch gathering with
-  edge-replication + pad masks. Sampling is a pure function of seed, epoch,
-  and absolute batch cursor in every mode.
+  shared_memory | disk` placement (see [Data loading](#data-loading) for
+  `disk`); vectorized windowing and batch gathering with edge-replication +
+  pad masks. Sampling is a pure function of seed, epoch, and absolute batch
+  cursor in every mode.
 - **Selections**: a data config's inline `selection:` block is a generative
   `(task, count)` recipe resolved against the store's `tasks.json`, not a
   hand-listed set of integer IDs. Two draw methods: `random` (default; a seeded
@@ -75,6 +76,86 @@ current update without multiprocessing large image batches.
 - **Outputs**: every run gets a self-contained directory with resolved config,
   immutable step checkpoints, an atomic relative `latest.pt` symlink, and
   logs/evaluations.
+
+## Data loading
+
+`training.data_mode` (`rgrl/dataset.py`'s `build_dataset`) picks how a
+split's data is placed for training:
+
+- `cuda_resident` / `shared_memory` (what `auto` picks between): the whole
+  split lives as one resident tensor, GPU or host RAM, sized against
+  `pin_fallback_gb` and live free VRAM. The common case for robomimic-scale
+  data.
+- `disk`: never chosen automatically. For a split too large for both VRAM
+  and host RAM (e.g. a 200-episode/2-camera DROID selection at ~50GB
+  uncompressed on a 30GB-RAM box) — `DiskSequenceDataset` preloads only the
+  cheap low-dim/action keys resident and decodes each sample's image window
+  on demand from the on-disk VideoStore, via a real multi-worker
+  `torch.utils.data.DataLoader` (`dataloader_workers`/`prefetch_factor`).
+
+### The decode backend matters most — check it explicitly
+
+`robo_dataset`'s video backend auto-detects torchcodec vs PyAV once per
+process (`backends/video.py:_pick_decoder_backend`) with **no config flag**
+and only a log line at import time — a venv missing torchcodec silently runs
+its documented `"pyav ... slowest; correct"` fallback, ~2.5x slower per
+frame (measured: 0.30ms vs ~0.75ms) than torchcodec for the random
+single-frame access `data_mode=disk` does. This was the actual bottleneck
+behind a long chain of `dataloader_workers`/`prefetch_factor`/`max_decoders`
+tuning that could only work around a slow decode path, not fix it — fixing
+the install took a DROID cooking-task run from ~50% GPU utilization
+(data-bound) to sustained ~100% (compute-bound), no code changes.
+
+Two dependency gaps, both silent (no error without them, just the slow
+fallback — this is why it's worth checking explicitly on any new box/venv):
+
+```bash
+# system: the FFmpeg lib torchcodec dlopens. avutil/avformat/avcodec are
+# often already present (pulled in by something else); avdevice specifically
+# often isn't.
+sudo apt install libavdevice60
+
+# python: plain `uv pip install torchcodec` resolves the newest release,
+# which expects a newer CUDA (currently libnvrtc.so.13) than this repo's
+# pinned cu128 torch build -- pyproject.toml pins torchcodec to the matched
+# pytorch-cu128 index, same as torch/torchvision.
+uv sync --extra video
+```
+
+Verify which backend actually ends up active (there's no other signal):
+
+```bash
+uv run python -c "
+import logging; logging.basicConfig(level=logging.INFO)
+from robo_dataset.backends.video import _pick_decoder_backend
+_pick_decoder_backend()"   # INFO: video decode backend: modern | legacy | pyav
+```
+
+### `data_mode=disk` tuning knobs
+
+- `dataloader_workers` / `prefetch_factor`: DataLoader parallelism/buffer
+  depth. More of either costs real host RAM — each worker is a full spawned
+  process, not a thread. On a 30GB-RAM box, 8 workers / prefetch 3 was the
+  empirical ceiling; 10-12 workers OOM or hit `av.error.BlockingIOError`
+  under memory pressure regardless of decode speed. Raising prefetch alone
+  only defers an average production/consumption rate mismatch (a longer
+  burst at the compute ceiling before degrading back down) — it doesn't fix
+  one.
+- `max_decoders`: per-process cap on `DiskSequenceDataset`'s video decoder
+  cache. Should cover the full episodes × image-keys working set (e.g. 200
+  episodes × 2 cameras = 400) so decoders never get evicted once warm —
+  undersizing it costs real throughput (measured ~30% slower at 16 vs 450
+  for a 400-entry working set); oversizing it past the working set buys
+  nothing.
+
+Worth knowing if writing a new `data_mode`: an earlier `DiskSequenceDataset`
+version fetched the *union* frame range per episode per batch. Under true
+random sampling over few episodes, a handful of a batch's samples landing in
+the same long episode at far-apart timesteps made that union span nearly the
+whole episode — measured one batch needing 512 frames but the union fetch
+decoding 22,640 (44x). Fixed by only taking the union when it's close to
+what's needed, else fetching each row's own small window individually (see
+`_decode_image_batch`).
 
 ## Use
 

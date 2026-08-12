@@ -1,0 +1,23 @@
+# DROID DiT flow for a store too large to hold resident in either host RAM or
+# VRAM: data_mode=disk decodes each sample's obs-horizon window on demand from
+# the on-disk VideoStore (rgrl/dataset.py's DiskSequenceDataset) rather than
+# materializing the split as one resident tensor.
+#
+# Requires the `video` extra -- without torchcodec the decode path silently
+# falls back to PyAV (~2.5x slower per frame) with nothing but an import-time
+# log line to notice. See README "Data loading" for the install and for the
+# full tuning rationale behind the knobs below.
+#
+# workers=8 is the safe ceiling on a 30GB-RAM box (10-12 hit BlockingIOError
+# under memory pressure); max_decoders should cover the whole
+# n_episodes x n_image_keys working set so decoders are never evicted once
+# warm -- 450 fits the 200-episode/2-camera baseline, so raise it for larger
+# selections.
+defaults:
+  - droid
+  - _self_
+
+data_mode: disk
+dataloader_workers: 8
+prefetch_factor: 3
+max_decoders: 450

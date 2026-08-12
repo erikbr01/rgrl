@@ -1,0 +1,18 @@
+defaults:
+  - _base/cooking_store@_here_
+  - _self_
+
+name: cooking_baseline_lid
+# Base cooking draw (seed 42, same as cooking_baseline) + a seeded draw of
+# 30 of the store's 34 "cooking - lid" episodes (see
+# fetch_droid_language_stats.py). expected_sha256 pins the resolved set --
+# run `python scripts/pin_selection.py data=cooking_baseline_lid` to
+# (re)compute it after any change.
+selection:
+  seed: 42
+  select:
+    - task: "cooking"
+      count: 200
+    - task: "cooking - lid"
+      count: 30
+  expected_sha256: "c1e354f0d8c6bc695a23e18211f0caa05e8b0bc9614932c473989b52812e21fd"

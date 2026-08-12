@@ -31,7 +31,7 @@ import torch
 from omegaconf import OmegaConf
 from torch import nn
 
-from rgrl.dataset import Windows, build_dataset
+from rgrl.dataset import VAL_SELECTIONS, Windows, build_dataset
 from rgrl.ema import EMA
 from rgrl.logutil import log_to_file
 from rgrl.profiler import SectionProfiler, chrome_trace
@@ -66,9 +66,16 @@ class TrainConfig:
     betas: tuple[float, float] = (0.95, 0.999)
     warmup_steps: int = 500
     seed: int = 0
+    # Seeds validation determinism: the val-loss RNG, and (with
+    # val_selection=random) which episodes are held out.
     val_seed: int = 17_029
 
     val_episodes: int = 4
+    # tail (default) holds out the last val_episodes; random draws a seeded
+    # subset spread across the selection -- use random whenever a selection
+    # appends a distinct subpopulation at the high episode ids, or the whole
+    # val set comes from that one subpopulation (see dataset._split_episodes).
+    val_selection: str = "tail"
     val_every: int = 2_000
     log_every: int = 100
     save_every: int = 10_000
@@ -90,7 +97,20 @@ class TrainConfig:
     # name for config compatibility.
     pin_fallback_gb: float = 20.0
     dataloader_workers: int = 0
-    data_mode: str = "auto"  # auto | cuda_resident | shared_memory
+    data_mode: str = "auto"  # auto | cuda_resident | shared_memory | disk
+    # DataLoader batches decoded ahead of consumption per worker, when
+    # data_mode uses one (shared_memory/disk); ignored for cuda_resident and
+    # for auto when it resolves to cuda_resident. Higher values hide more
+    # disk/decode latency behind the GPU step at the cost of more host RAM
+    # for in-flight batches -- relevant mainly for data_mode=disk, where
+    # dataloader_workers should also be > 0 for this to do anything.
+    prefetch_factor: int = 4
+    # data_mode=disk only: per-process cap on DiskSequenceDataset's video
+    # decoder cache (shared across image keys). Should cover the full
+    # episodes x image-keys working set to avoid eviction thrashing once
+    # warm -- e.g. 450 comfortably covers a 200-episode/2-camera selection.
+    # Ignored by every other data_mode.
+    max_decoders: int = 450
     device_memory_reserve_gb: float = 4.0
 
     compile: bool = True
@@ -146,6 +166,18 @@ def resolve_recipe(cfg: TrainConfig) -> ResolvedRecipe:
     if cfg.compile_mode not in _COMPILE_MODES:
         raise ValueError(
             f"compile_mode must be one of {sorted(_COMPILE_MODES)}, got {cfg.compile_mode!r}"
+        )
+    # Both feed DataLoader/decoder-cache sizes that fail deep and opaquely when
+    # non-positive: max_decoders=0 makes robo_dataset's LRU pop from an empty
+    # OrderedDict (KeyError inside a worker), and prefetch_factor=0 is rejected
+    # by DataLoader only once workers are enabled.
+    if cfg.dataloader_workers < 0:
+        raise ValueError(f"dataloader_workers must be >= 0, got {cfg.dataloader_workers}")
+    _positive("prefetch_factor", cfg.prefetch_factor)
+    _positive("max_decoders", cfg.max_decoders)
+    if cfg.val_selection not in VAL_SELECTIONS:
+        raise ValueError(
+            f"val_selection must be one of {list(VAL_SELECTIONS)}, got {cfg.val_selection!r}"
         )
 
     return ResolvedRecipe(
@@ -218,6 +250,8 @@ def _resume_spec(
         "pin_fallback_gb",
         "dataloader_workers",
         "data_mode",
+        "prefetch_factor",
+        "max_decoders",
         "device_memory_reserve_gb",
     }:
         training.pop(key, None)
@@ -386,12 +420,15 @@ def _train(
         device,
         cfg.val_episodes,
         "train",
+        val_selection=cfg.val_selection,
+        val_seed=cfg.val_seed,
         pin_fallback_gb=cfg.pin_fallback_gb,
         dataloader_workers=cfg.dataloader_workers,
         sample_weights=sample_weights,
         data_mode=cfg.data_mode,
         device_memory_reserve_gb=cfg.device_memory_reserve_gb,
         model_state_bytes=model_state_bytes,
+        max_decoders=cfg.max_decoders,
     )
     val = (
         build_dataset(
@@ -400,11 +437,14 @@ def _train(
             device,
             cfg.val_episodes,
             "val",
+            val_selection=cfg.val_selection,
+            val_seed=cfg.val_seed,
             pin_fallback_gb=cfg.pin_fallback_gb,
             dataloader_workers=cfg.dataloader_workers,
             data_mode=cfg.data_mode,
             device_memory_reserve_gb=cfg.device_memory_reserve_gb,
             model_state_bytes=model_state_bytes,
+            max_decoders=cfg.max_decoders,
         )
         if cfg.val_episodes
         else None
@@ -645,7 +685,9 @@ def _train(
     loss_count = 0
     t_log = time.perf_counter()
     policy.train()
-    batches = data.batches(cfg.batch_size, cfg.seed, start_batch=start_step)
+    batches = data.batches(
+        cfg.batch_size, cfg.seed, start_batch=start_step, prefetch_factor=cfg.prefetch_factor
+    )
 
     def one_step(step: int) -> None:
         nonlocal loss_sum, loss_count

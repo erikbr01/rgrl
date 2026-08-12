@@ -9,6 +9,11 @@ warmup_steps: 500
 seed: 0
 val_seed: 17029
 val_episodes: 4
+# tail | random -- which episodes are held out. tail (the historical default)
+# takes the last val_episodes, which is stable under store growth but ties the
+# val set to episode id: if a selection appends a distinct subpopulation at the
+# high ids, the entire val set comes from it. Use random there.
+val_selection: tail
 val_every: 2000
 log_every: 100
 save_every: 10000
@@ -18,6 +23,8 @@ resume_ignore_fingerprint: false
 pin_fallback_gb: 20.0
 dataloader_workers: 0
 data_mode: auto
+prefetch_factor: 4
+max_decoders: 450
 device_memory_reserve_gb: 4.0
 compile: true
 # compile_mode: default        # previous default (fast compile, no autotuning)

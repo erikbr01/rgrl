@@ -577,7 +577,7 @@ def test_generative_selection_builds_a_unique_episode_dataset(video_store_path, 
     assert store.meta.num_frames == sum(src.episode_length(i) for i in phys)
 
     # No window crosses an episode boundary in the constructed dataset.
-    bounds = _split_bounds(store, 0, store.meta.num_episodes)
+    bounds = _split_bounds(store, np.arange(store.meta.num_episodes))
     obs, _act, _pad = _windows_index_table(bounds, Windows(obs_horizon=2, horizon=4))
     frame_ep = {f: ep for ep, (lo, hi) in enumerate(bounds.tolist()) for f in range(lo, hi)}
     assert all(len({frame_ep[int(f)] for f in row}) == 1 for row in obs.numpy())

@@ -1,19 +1,24 @@
 # @package _global_
-# cooking baseline: single-wrist DROID DiT flow, 300k steps (training/droid).
-# Cooking episodes are longer than prepare_tray/set_table, so the baseline was
-# under-trained at 300k; continue to 450k with resume=extend (see README/PR).
+# cooking baseline: single-wrist DROID DiT flow, 300k steps (training/droid_disk).
+# Cooking episodes are longer than prepare_tray/set_table, so an earlier
+# baseline was extended to 450k with resume=extend. Do NOT do that when this
+# baseline is the control for the variant sweep: cooking_baseline_{corn,carrot,
+# lid} scale 300k -> 350k to hold epochs constant against a 300k baseline, so a
+# 450k baseline confounds the comparison with training budget.
 defaults:
   - override /data: cooking_baseline
   - override /target: cooking_baseline
   - override /policy: dit_flow_droid
-  - override /training: droid
+  - override /training: droid_disk
 
 training:
   wandb_project: cooking-droid
-  wandb_name: cooking_baseline_dit
-  # batch 256 (same as prepare_tray). The ~31GB cooking store exceeds 24GB VRAM,
-  # so the loader keeps it in host RAM (shared_memory) rather than cuda_resident,
-  # which leaves room for batch 256 on a 24GB 4090.
+  wandb_name: cooking_baseline_dit_local_disk
+  # The ~50GB 200-episode/2-camera store fits neither cuda_resident nor
+  # shared_memory, hence training/droid_disk. Nothing resident means batch 256
+  # is not competing with the store for VRAM.
   batch_size: 256
 
-out: runs/cooking_baseline_dit
+# runs/cooking_baseline_dit already holds an earlier baseline's checkpoints
+# (a different store/data_mode) -- this run name keeps that lineage untouched.
+out: runs/cooking_baseline_dit_local_disk

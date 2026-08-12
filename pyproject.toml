@@ -44,6 +44,16 @@ serve = [
 ]
 video = [
     "av>=12",
+    # robo_dataset's video backend (backends/video.py:_pick_decoder_backend)
+    # auto-detects and prefers torchcodec over av/PyAV at runtime -- PyAV is
+    # its documented "slowest; correct" fallback, ~2.5x slower per frame
+    # (measured) than torchcodec for the random single-frame access
+    # DiskSequenceDataset does. Without this, decode silently falls back to
+    # PyAV with no error or warning -- there's no config flag surfacing
+    # which backend got picked, only a log line at import time. Also needs
+    # `libavdevice60` as a system package (torchcodec dlopens it; apt install
+    # libavdevice60) -- not installable via uv/pip.
+    "torchcodec",
 ]
 
 [build-system]
@@ -72,6 +82,10 @@ select = ["E9", "F63", "F7", "F82"]
 [tool.uv.sources]
 torch = [{ index = "pytorch-cu128" }]
 torchvision = [{ index = "pytorch-cu128" }]
+# Plain PyPI torchcodec resolves its newest release, which tracks a newer
+# CUDA (currently expects libnvrtc.so.13) than this repo's pinned cu128
+# torch build -- pin to the matched index like torch/torchvision above.
+torchcodec = [{ index = "pytorch-cu128" }]
 # vendored as a git submodule (third_party/robo_dataset), not copied in — stays
 # a standalone repo at github.com:erikbr01/robo_dataset
 robo_dataset = { path = "third_party/robo_dataset", editable = true }
