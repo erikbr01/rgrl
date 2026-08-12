@@ -16,5 +16,8 @@ training:
   # 230 episodes vs the 200-episode baseline (+15%) -- scale steps to match
   # (300k * 1.15 ~= 345k, rounded to 350k).
   steps: 350000
+  # 230 episodes - 4 val = 226 train x 2 image keys = 452 decoders, just past
+  # droid_disk's 450 default; undersizing silently thrashes the LRU cache.
+  max_decoders: 460
 
 out: runs/cooking_baseline_lid_dit_local_disk

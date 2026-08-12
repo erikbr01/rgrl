@@ -1,5 +1,5 @@
 defaults:
-  - cooking_baseline_store
+  - _base/cooking_store@_here_
   - _self_
 
 name: cooking_baseline_corn

@@ -50,30 +50,71 @@ class Windows:
     horizon: int  # action prediction horizon incl. obs frames (e.g. 16)
 
 
-def _split_episode_range(store: EpisodeStore, val_episodes: int, val_split: str) -> tuple[int, int]:
-    """[lo, hi) episode indices for this split -- deterministic: the last
-    val_episodes are validation, everything else is train."""
+VAL_SELECTIONS = ("tail", "random")
+
+
+def _split_episodes(
+    store: EpisodeStore,
+    val_episodes: int,
+    val_split: str,
+    val_selection: str = "tail",
+    val_seed: int = 0,
+) -> np.ndarray:
+    """Ascending episode indices belonging to this split.
+
+    ``tail`` (default) holds out the last ``val_episodes`` -- deterministic and
+    stable under store growth, but it correlates the val set with episode id.
+    That matters whenever a selection appends a distinct subpopulation at the
+    high ids (e.g. the cooking variant configs, where the tail is entirely
+    variant-task episodes), because the held-out episodes are then drawn from
+    one task and the variant data the experiment exists to measure is the only
+    data withheld from training.
+
+    ``random`` instead draws a seeded subset spread across the whole selection,
+    so the val set is representative and every subpopulation contributes to
+    both splits. Seeded by ``val_seed``, so the partition is reproducible.
+    """
     n_eps = store.meta.num_episodes
     if val_split not in {"train", "val"}:
         raise ValueError(f"val_split must be 'train' or 'val', got {val_split!r}")
+    if val_selection not in VAL_SELECTIONS:
+        raise ValueError(
+            f"val_selection must be one of {list(VAL_SELECTIONS)}, got {val_selection!r}"
+        )
     if val_episodes < 0 or val_episodes >= n_eps:
         raise ValueError(
             f"val_episodes must satisfy 0 <= val_episodes < num_episodes "
             f"({n_eps}), got {val_episodes}"
         )
+    all_eps = np.arange(n_eps, dtype=np.int64)
     if not val_episodes:
-        return 0, n_eps
-    return (0, n_eps - val_episodes) if val_split == "train" else (n_eps - val_episodes, n_eps)
+        return all_eps
+    if val_selection == "tail":
+        val_eps = all_eps[n_eps - val_episodes:]
+    else:
+        val_eps = np.sort(
+            np.random.default_rng(val_seed).choice(all_eps, size=val_episodes, replace=False)
+        )
+    if val_split == "val":
+        return val_eps
+    return np.setdiff1d(all_eps, val_eps, assume_unique=True)
 
 
-def _split_bounds(store: EpisodeStore, ep_lo: int, ep_hi: int) -> np.ndarray:
-    """This split's [start, end) frame bounds per episode, shifted local to
-    frame 0 -- a split only ever loads its own frames (see build_dataset),
-    so its window table must index into that split-local tensor, not the
-    full store's frame positions."""
-    bounds = store.episode_bounds()[ep_lo:ep_hi]
-    frame_offset = int(bounds[0][0]) if len(bounds) else 0
-    return bounds - frame_offset
+def _split_bounds(store: EpisodeStore, episodes: np.ndarray) -> np.ndarray:
+    """This split's [start, end) frame bounds per episode, renumbered so the
+    split's own frames start at 0 -- a split only ever loads its own frames
+    (see build_dataset), so its window table must index into that split-local
+    tensor, not the full store's frame positions.
+
+    ``episodes`` need not be contiguous (val_selection=random), so bounds are
+    re-packed from episode lengths rather than shifted by a single offset.
+    """
+    if len(episodes) == 0:
+        return np.empty((0, 2), dtype=np.int64)
+    bounds = store.episode_bounds()[episodes]
+    lengths = bounds[:, 1] - bounds[:, 0]
+    starts = np.concatenate([[0], np.cumsum(lengths)[:-1]])
+    return np.stack([starts, starts + lengths], axis=1).astype(np.int64)
 
 
 def _windows_index_table(bounds: np.ndarray, windows: Windows) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -111,12 +152,14 @@ def _windows_index_table(bounds: np.ndarray, windows: Windows) -> tuple[torch.Te
 
 def _split_sample_weights(
     store: EpisodeStore,
-    ep_lo: int,
-    ep_hi: int,
+    episodes: np.ndarray,
     sample_weights: torch.Tensor | None,
     val_split: str,
 ) -> torch.Tensor | None:
-    """Validate full-store frame weights and return this split's contiguous slice."""
+    """Validate full-store frame weights and gather this split's frames.
+
+    Gathers per episode rather than slicing a frame range, so it stays correct
+    for a non-contiguous split (val_selection=random)."""
     if sample_weights is None:
         return None
     if len(sample_weights) != store.meta.num_frames:
@@ -125,9 +168,12 @@ def _split_sample_weights(
             f"store.meta.num_frames={store.meta.num_frames}"
         )
     bounds = store.episode_bounds()
-    frame_lo = int(bounds[ep_lo][0]) if ep_lo < ep_hi else 0
-    frame_hi = int(bounds[ep_hi - 1][1]) if ep_lo < ep_hi else 0
-    split_weights = sample_weights[frame_lo:frame_hi].float().cpu()
+    frame_ids = (
+        np.concatenate([np.arange(bounds[e][0], bounds[e][1]) for e in episodes])
+        if len(episodes)
+        else np.empty(0, dtype=np.int64)
+    )
+    split_weights = sample_weights[torch.from_numpy(frame_ids)].float().cpu()
     if not torch.isfinite(split_weights).all() or (split_weights < 0).any():
         raise ValueError("sample_weights must be finite and >= 0")
     if split_weights.sum() <= 0:
@@ -232,18 +278,20 @@ class GpuSequenceDataset:
         device: torch.device,
         val_episodes: int = 0,
         val_split: str = "train",
+        val_selection: str = "tail",
+        val_seed: int = 0,
         sample_weights: torch.Tensor | None = None,
     ):
         self.windows = windows
         self.device = device
         self.data_device = device
-        ep_lo, ep_hi = _split_episode_range(store, val_episodes, val_split)
-        self.bounds = _split_bounds(store, ep_lo, ep_hi)
+        episodes = _split_episodes(store, val_episodes, val_split, val_selection, val_seed)
+        self.bounds = _split_bounds(store, episodes)
         self.image_keys = [k for k, s in store.meta.keys.items() if s.kind == KIND_IMAGE]
         self.state_keys = [k for k, s in store.meta.keys.items() if s.kind == "state"]
 
         self.tensors: dict[str, torch.Tensor] = {
-            key: torch.from_numpy(store.load(key, episode_range=(ep_lo, ep_hi))).to(device)
+            key: torch.from_numpy(store.load(key, episodes=episodes)).to(device)
             for key in store.meta.keys
         }
 
@@ -259,7 +307,7 @@ class GpuSequenceDataset:
         # same episode range used above so each weight stays aligned to its
         # split-local anchor frame.
         self.sample_weights = _split_sample_weights(
-            store, ep_lo, ep_hi, sample_weights, val_split
+            store, episodes, sample_weights, val_split
         )
 
     def epoch_perm(self, seed: int, epoch: int) -> torch.Tensor:
@@ -327,20 +375,22 @@ class CpuSequenceDataset(torch.utils.data.Dataset):
         device: torch.device,
         val_episodes: int = 0,
         val_split: str = "train",
+        val_selection: str = "tail",
+        val_seed: int = 0,
         num_workers: int = 1,
         sample_weights: torch.Tensor | None = None,
     ):
         self.device = device
         self.data_device = torch.device("cpu")
         self.num_workers = num_workers
-        ep_lo, ep_hi = _split_episode_range(store, val_episodes, val_split)
-        bounds = _split_bounds(store, ep_lo, ep_hi)
+        episodes = _split_episodes(store, val_episodes, val_split, val_selection, val_seed)
+        bounds = _split_bounds(store, episodes)
         self.image_keys = [k for k, s in store.meta.keys.items() if s.kind == KIND_IMAGE]
         self.state_keys = [k for k, s in store.meta.keys.items() if s.kind == "state"]
 
         self.tensors: dict[str, torch.Tensor] = {}
         for key in store.meta.keys:
-            t = torch.from_numpy(store.load(key, episode_range=(ep_lo, ep_hi)))
+            t = torch.from_numpy(store.load(key, episodes=episodes))
             # POSIX shared memory is only needed by actual worker processes.
             # The default producer-thread path stays in-process, avoiding a
             # second full-store copy and /dev/shm capacity requirement.
@@ -353,7 +403,7 @@ class CpuSequenceDataset(torch.utils.data.Dataset):
         if self.num_samples == 0:
             raise ValueError(f"{val_split} split contains no window samples")
         self.sample_weights = _split_sample_weights(
-            store, ep_lo, ep_hi, sample_weights, val_split
+            store, episodes, sample_weights, val_split
         )
 
     def __len__(self) -> int:
@@ -483,6 +533,8 @@ class DiskSequenceDataset(torch.utils.data.Dataset):
         device: torch.device,
         val_episodes: int = 0,
         val_split: str = "train",
+        val_selection: str = "tail",
+        val_seed: int = 0,
         num_workers: int = 1,
         sample_weights: torch.Tensor | None = None,
         max_decoders: int = 450,
@@ -496,9 +548,8 @@ class DiskSequenceDataset(torch.utils.data.Dataset):
         self._proc_store = store
         self._store_pid = os.getpid()
 
-        ep_lo, ep_hi = _split_episode_range(store, val_episodes, val_split)
-        self.ep_lo = ep_lo
-        bounds = _split_bounds(store, ep_lo, ep_hi)
+        episodes = _split_episodes(store, val_episodes, val_split, val_selection, val_seed)
+        bounds = _split_bounds(store, episodes)
         self.image_keys = [k for k, s in store.meta.keys.items() if s.kind == KIND_IMAGE]
         self.state_keys = [k for k, s in store.meta.keys.items() if s.kind == "state"]
 
@@ -506,7 +557,7 @@ class DiskSequenceDataset(torch.utils.data.Dataset):
         # that episode) -- what EpisodeStore.get_frames expects. Precomputed
         # once here rather than per-sample.
         lengths = (bounds[:, 1] - bounds[:, 0]).astype(np.int64)
-        self._frame_episode = np.repeat(np.arange(ep_lo, ep_hi, dtype=np.int64), lengths)
+        self._frame_episode = np.repeat(episodes, lengths)
         self._frame_local = np.arange(int(lengths.sum()), dtype=np.int64) - np.repeat(
             bounds[:, 0], lengths
         )
@@ -514,7 +565,7 @@ class DiskSequenceDataset(torch.utils.data.Dataset):
         # Cheap keys stay fully resident -- only images are lazy.
         self.tensors: dict[str, torch.Tensor] = {}
         for key in [*self.state_keys, "action"]:
-            t = torch.from_numpy(store.load(key, episode_range=(ep_lo, ep_hi)))
+            t = torch.from_numpy(store.load(key, episodes=episodes))
             if self.num_workers > 0:
                 t.share_memory_()
             self.tensors[key] = t
@@ -524,7 +575,7 @@ class DiskSequenceDataset(torch.utils.data.Dataset):
         if self.num_samples == 0:
             raise ValueError(f"{val_split} split contains no window samples")
         self.sample_weights = _split_sample_weights(
-            store, ep_lo, ep_hi, sample_weights, val_split
+            store, episodes, sample_weights, val_split
         )
 
         # Never keep using the caller's store instance past construction --
@@ -582,7 +633,11 @@ class DiskSequenceDataset(torch.utils.data.Dataset):
         return self.num_samples
 
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
-        return self._gather_cpu(torch.as_tensor([idx], dtype=torch.int64))
+        # Squeeze the batch dim back off: CpuSequenceDataset.__getitem__ returns
+        # an unbatched sample, and build_dataset treats the two as drop-in
+        # substitutes, so the plain map-style protocol must agree between them.
+        batch = self._gather_cpu(torch.as_tensor([idx], dtype=torch.int64))
+        return {key: value[0] for key, value in batch.items()}
 
     def __getitems__(self, sample_ids: list[int]) -> dict[str, torch.Tensor]:
         return self._gather_cpu(torch.as_tensor(sample_ids, dtype=torch.int64))
@@ -716,6 +771,8 @@ def build_dataset(
     device: torch.device,
     val_episodes: int = 0,
     val_split: str = "train",
+    val_selection: str = "tail",
+    val_seed: int = 0,
     pin_fallback_gb: float = 20.0,
     dataloader_workers: int = 0,
     sample_weights: torch.Tensor | None = None,
@@ -748,11 +805,13 @@ def build_dataset(
         raise ValueError("device_memory_reserve_gb must be >= 0")
     if data_mode == "disk":
         return DiskSequenceDataset(
-            store, windows, device, val_episodes, val_split, dataloader_workers, sample_weights,
+            store, windows, device, val_episodes, val_split,
+            val_selection=val_selection, val_seed=val_seed,
+            num_workers=dataloader_workers, sample_weights=sample_weights,
             max_decoders=max_decoders,
         )
-    ep_lo, ep_hi = _split_episode_range(store, val_episodes, val_split)
-    bounds = _split_bounds(store, ep_lo, ep_hi)
+    episodes = _split_episodes(store, val_episodes, val_split, val_selection, val_seed)
+    bounds = _split_bounds(store, episodes)
     n_frames = int(bounds[-1][1]) if len(bounds) else 0
     store_bytes = store.nbytes(n_frames)
     gb = store_bytes / 1e9
@@ -793,9 +852,12 @@ def build_dataset(
             device,
             val_episodes,
             val_split,
-            dataloader_workers,
-            sample_weights,
+            val_selection=val_selection,
+            val_seed=val_seed,
+            num_workers=dataloader_workers,
+            sample_weights=sample_weights,
         )
     return GpuSequenceDataset(
-        store, windows, device, val_episodes, val_split, sample_weights
+        store, windows, device, val_episodes, val_split,
+        val_selection=val_selection, val_seed=val_seed, sample_weights=sample_weights,
     )

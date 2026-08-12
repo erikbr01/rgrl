@@ -31,7 +31,7 @@ import torch
 from omegaconf import OmegaConf
 from torch import nn
 
-from rgrl.dataset import Windows, build_dataset
+from rgrl.dataset import VAL_SELECTIONS, Windows, build_dataset
 from rgrl.ema import EMA
 from rgrl.logutil import log_to_file
 from rgrl.profiler import SectionProfiler, chrome_trace
@@ -66,9 +66,16 @@ class TrainConfig:
     betas: tuple[float, float] = (0.95, 0.999)
     warmup_steps: int = 500
     seed: int = 0
+    # Seeds validation determinism: the val-loss RNG, and (with
+    # val_selection=random) which episodes are held out.
     val_seed: int = 17_029
 
     val_episodes: int = 4
+    # tail (default) holds out the last val_episodes; random draws a seeded
+    # subset spread across the selection -- use random whenever a selection
+    # appends a distinct subpopulation at the high episode ids, or the whole
+    # val set comes from that one subpopulation (see dataset._split_episodes).
+    val_selection: str = "tail"
     val_every: int = 2_000
     log_every: int = 100
     save_every: int = 10_000
@@ -159,6 +166,18 @@ def resolve_recipe(cfg: TrainConfig) -> ResolvedRecipe:
     if cfg.compile_mode not in _COMPILE_MODES:
         raise ValueError(
             f"compile_mode must be one of {sorted(_COMPILE_MODES)}, got {cfg.compile_mode!r}"
+        )
+    # Both feed DataLoader/decoder-cache sizes that fail deep and opaquely when
+    # non-positive: max_decoders=0 makes robo_dataset's LRU pop from an empty
+    # OrderedDict (KeyError inside a worker), and prefetch_factor=0 is rejected
+    # by DataLoader only once workers are enabled.
+    if cfg.dataloader_workers < 0:
+        raise ValueError(f"dataloader_workers must be >= 0, got {cfg.dataloader_workers}")
+    _positive("prefetch_factor", cfg.prefetch_factor)
+    _positive("max_decoders", cfg.max_decoders)
+    if cfg.val_selection not in VAL_SELECTIONS:
+        raise ValueError(
+            f"val_selection must be one of {list(VAL_SELECTIONS)}, got {cfg.val_selection!r}"
         )
 
     return ResolvedRecipe(
@@ -401,6 +420,8 @@ def _train(
         device,
         cfg.val_episodes,
         "train",
+        val_selection=cfg.val_selection,
+        val_seed=cfg.val_seed,
         pin_fallback_gb=cfg.pin_fallback_gb,
         dataloader_workers=cfg.dataloader_workers,
         sample_weights=sample_weights,
@@ -416,6 +437,8 @@ def _train(
             device,
             cfg.val_episodes,
             "val",
+            val_selection=cfg.val_selection,
+            val_seed=cfg.val_seed,
             pin_fallback_gb=cfg.pin_fallback_gb,
             dataloader_workers=cfg.dataloader_workers,
             data_mode=cfg.data_mode,

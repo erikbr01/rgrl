@@ -1,6 +1,6 @@
 # @package _global_
 # cooking baseline + 30 "cooking - carrot" episodes, single-wrist DROID DiT
-# flow, 300k steps (training/droid_disk). Same recipe as cooking_baseline.yaml
+# flow, 350k steps (training/droid_disk). Same recipe as cooking_baseline.yaml
 # except data: cooking_baseline_carrot (target's shape_meta is unchanged, so
 # it still points at the shared cooking_baseline target config).
 defaults:
@@ -16,5 +16,8 @@ training:
   # 230 episodes vs the 200-episode baseline (+15%) -- scale steps to match
   # (300k * 1.15 ~= 345k, rounded to 350k).
   steps: 350000
+  # 230 episodes - 4 val = 226 train x 2 image keys = 452 decoders, just past
+  # droid_disk's 450 default; undersizing silently thrashes the LRU cache.
+  max_decoders: 460
 
 out: runs/cooking_baseline_carrot_dit_local_disk

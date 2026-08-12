@@ -9,6 +9,11 @@ warmup_steps: 500
 seed: 0
 val_seed: 17029
 val_episodes: 4
+# tail | random -- which episodes are held out. tail (the historical default)
+# takes the last val_episodes, which is stable under store growth but ties the
+# val set to episode id: if a selection appends a distinct subpopulation at the
+# high ids, the entire val set comes from it. Use random there.
+val_selection: tail
 val_every: 2000
 log_every: 100
 save_every: 10000

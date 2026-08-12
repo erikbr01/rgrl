@@ -1,7 +1,10 @@
 # @package _global_
 # cooking baseline: single-wrist DROID DiT flow, 300k steps (training/droid_disk).
-# Cooking episodes are longer than prepare_tray/set_table, so the baseline was
-# under-trained at 300k; continue to 450k with resume=extend (see README/PR).
+# Cooking episodes are longer than prepare_tray/set_table, so an earlier
+# baseline was extended to 450k with resume=extend. Do NOT do that when this
+# baseline is the control for the variant sweep: cooking_baseline_{corn,carrot,
+# lid} scale 300k -> 350k to hold epochs constant against a 300k baseline, so a
+# 450k baseline confounds the comparison with training budget.
 defaults:
   - override /data: cooking_baseline
   - override /target: cooking_baseline

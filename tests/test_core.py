@@ -11,7 +11,15 @@ from robo_dataset.backends.zarr_backend import ZarrStoreWriter
 from robo_dataset.normalization import fit_key
 from robo_dataset.transforms.gpu_batch import CenterCrop, RandomCrop
 
-from rgrl.dataset import CpuSequenceDataset, GpuSequenceDataset, Windows, build_dataset
+from rgrl.dataset import (
+    CpuSequenceDataset,
+    DiskSequenceDataset,
+    GpuSequenceDataset,
+    Windows,
+    _split_bounds,
+    _split_episodes,
+    build_dataset,
+)
 from rgrl.inference.checkpoint import InferenceConfig, load_policy
 from rgrl.inference.legacy_checkpoint import legacy_shape_meta
 from rgrl.nets.unet1d import ConditionalUnet1D
@@ -115,8 +123,8 @@ def test_image_window_preserves_nhwc_and_current_action_alignment():
             return np.array([[0, n]], dtype=np.int64)
 
         @staticmethod
-        def load(key, episode_range=None):
-            assert episode_range == (0, 1)
+        def load(key, episodes=None):
+            assert list(episodes) == [0]
             return images if key == "camera" else actions
 
     ds = GpuSequenceDataset(ImageStore(), Windows(2, 4), torch.device("cpu"))
@@ -158,7 +166,7 @@ def test_val_split_loads_only_its_own_episodes_not_a_full_store_copy(tiny_store)
     # val's data must be episode 2's (the last episode) actual frames, not
     # episode 0's or garbage from a wrong offset -- get it independently
     # from the store and compare.
-    expected = tiny_store.load("state", episode_range=(2, 3))
+    expected = tiny_store.load("state", episodes=[2])
     np.testing.assert_array_equal(val.tensors["state"].numpy(), expected)
 
     # val's windowing must be entirely local (0-based), never referencing
@@ -1053,3 +1061,71 @@ def test_write_sidecars_rejects_unknown_norm_method(tmp_path):
     d.mkdir()
     with pytest.raises(ValueError, match="norm_method"):
         write_sidecars(d, stats_keys={"action": np.zeros((3, 2), np.float32)}, norm_method="bogus")
+
+
+# --- data_mode=disk and val-split selection -------------------------------
+
+
+def test_build_dataset_disk_mode_opens_non_video_store(tiny_store):
+    """data_mode=disk must not force max_decoders onto a backend that does not
+    accept it. DiskSequenceDataset always passes a value (its default is an int,
+    never None), and the store is reopened lazily per process, so a regression
+    here surfaces as a TypeError inside DataLoader workers mid-run rather than
+    at build time -- hence fetching a batch, not just constructing."""
+    ds = build_dataset(
+        tiny_store, Windows(2, 4), torch.device("cpu"), data_mode="disk", dataloader_workers=0
+    )
+    assert isinstance(ds, DiskSequenceDataset)
+    batch = ds.gather(torch.arange(4))
+    assert batch["state"].shape == (4, 2, 3)
+    assert batch["action"].shape == (4, 4, 2)
+
+
+def test_disk_getitem_matches_cpu_getitem_shape(tiny_store):
+    """__getitem__ is the standard map-style fallback; the disk and cpu classes
+    are drop-in substitutes chosen by build_dataset, so it must be unbatched in
+    both."""
+    windows = Windows(2, 4)
+    disk = DiskSequenceDataset(tiny_store, windows, torch.device("cpu"))
+    cpu = CpuSequenceDataset(tiny_store, windows, torch.device("cpu"), num_workers=0)
+    for key, value in cpu[3].items():
+        assert disk[3][key].shape == value.shape, key
+
+
+@pytest.mark.parametrize("selection", ["tail", "random"])
+def test_val_split_partitions_episodes_without_overlap(tiny_store, selection):
+    """train and val must together cover every episode exactly once, whichever
+    selection strategy is used."""
+    train = _split_episodes(tiny_store, 1, "train", selection, val_seed=3)
+    val = _split_episodes(tiny_store, 1, "val", selection, val_seed=3)
+    assert len(val) == 1
+    assert sorted([*train.tolist(), *val.tolist()]) == [0, 1, 2]
+
+
+def test_val_selection_random_can_hold_out_a_non_tail_episode(tiny_store):
+    """The point of random: the held-out episode is not pinned to the highest
+    id, so a subpopulation appended at the high ids is not the entire val set."""
+    held_out = {
+        int(_split_episodes(tiny_store, 1, "val", "random", val_seed=seed)[0])
+        for seed in range(30)
+    }
+    assert held_out != {2}, "random selection never picked anything but the tail"
+    assert held_out <= {0, 1, 2}
+
+
+def test_val_selection_random_split_frames_are_self_consistent(tiny_store):
+    """A non-contiguous split must renumber its own frames from 0 and load
+    exactly those episodes' frames -- the bounds table and the loaded tensors
+    have to agree, or windows index into the wrong frames."""
+    episodes = _split_episodes(tiny_store, 1, "train", "random", val_seed=3)
+    bounds = _split_bounds(tiny_store, episodes)
+    lengths = [7, 5, 9]
+    assert bounds[0][0] == 0
+    assert [int(b[1] - b[0]) for b in bounds] == [lengths[e] for e in episodes]
+    assert int(bounds[-1][1]) == sum(lengths[e] for e in episodes)
+    assert len(tiny_store.load("state", episodes=episodes)) == int(bounds[-1][1])
+
+
+def test_val_selection_rejects_unknown_strategy(tiny_store):
+    with pytest.raises(ValueError, match="val_selection"):
+        _split_episodes(tiny_store, 1, "train", "middle")
