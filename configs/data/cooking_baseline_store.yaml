@@ -1,0 +1,40 @@
+# Shared spec for the cooking_baseline family (baseline / corn / carrot / lid
+# and the corn_carrot / corn_lid / carrot_lid pairs). Those variants differ
+# only in name + selection; store_path, dataset_id, abs_action, rename, and
+# shape_meta are identical and defined once here. Not selectable on its own
+# (no name/selection) -- pick a concrete variant with data=cooking_baseline*,
+# each of which composes this base.
+#
+# Cooking store converted locally from the raw DROID SVOs with policy_graphs'
+# convert_droid_data.py (3 cameras: wrist_image_left, wrist_image_right,
+# exterior_image_1_left; joint_velocity; 180x320; fps15; crf23; untrimmed --
+# no trim_droid_idle_beginnings.py pass). The variant-instruction episodes
+# ("cooking - corn" / "- carrot" / "- lid") were appended to the same physical
+# store as new episode ids above the base "cooking" ones, so every variant
+# resolves the identical base-200 draw rather than a copy of it.
+#
+# shape_meta trains on a single wrist camera (wrist_image_left) + the exterior
+# view; the store's third camera (wrist_image_right) is present but unused and
+# is never opened or decoded.
+store_path: ${oc.env:RGRL_DATA_ROOT,/mnt/ssdB/erik}/cooking_data/training_data
+dataset_id: droid_cooking_local_v1
+abs_action: false
+rename: {}
+shape_meta:
+  obs:
+    wrist_image_left:
+      shape: [180, 320, 3]
+      type: rgb
+      channel_order: rgb
+    exterior_image_1_left:
+      shape: [180, 320, 3]
+      type: rgb
+      channel_order: rgb
+    joint_positions:
+      shape: [7]
+      type: low_dim
+    gripper_position:
+      shape: [1]
+      type: low_dim
+  action:
+    shape: [8]

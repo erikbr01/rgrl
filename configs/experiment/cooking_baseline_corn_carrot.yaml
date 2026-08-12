@@ -1,0 +1,22 @@
+# @package _global_
+# cooking baseline + 30 "cooking - corn" + 30 "cooking - carrot" episodes,
+# single-wrist DROID DiT flow, 400k steps (training/droid_disk). Same recipe
+# as cooking_baseline.yaml except data: cooking_baseline_corn_carrot (target's
+# shape_meta is unchanged, so it still points at the shared cooking_baseline
+# target config).
+defaults:
+  - override /data: cooking_baseline_corn_carrot
+  - override /target: cooking_baseline
+  - override /policy: dit_flow_droid
+  - override /training: droid_disk
+
+training:
+  wandb_project: cooking-droid
+  wandb_name: cooking_baseline_corn_carrot_dit_local_disk
+  batch_size: 256
+  # 260 episodes vs the 200-episode baseline (+30%) -- scale steps to match
+  # (300k * 1.30 = 390k, rounded to 400k), same convention as the 230-episode
+  # single-variant configs (which scale 300k * 1.15 -> 350k).
+  steps: 400000
+
+out: runs/cooking_baseline_corn_carrot_dit_local_disk

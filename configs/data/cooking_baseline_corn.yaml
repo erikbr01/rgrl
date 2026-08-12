@@ -1,15 +1,10 @@
+defaults:
+  - cooking_baseline_store
+  - _self_
+
 name: cooking_baseline_corn
-# Same physical store as cooking_baseline.yaml (../training_data) -- the
-# corn-instruction episodes were appended in place as new episode ids
-# above cooking_baseline's, so this selection only adds a second `select`
-# rule; the base 200 "cooking" episodes are the identical draw as
-# cooking_baseline (same seed/task/count), not a copy.
-store_path: ${oc.env:RGRL_DATA_ROOT,/home/hardware/code/erik/rgrl}/training_data
-dataset_id: droid_cooking_local_v1
-abs_action: false
-rename: {}
 # Base cooking draw (seed 42, same as cooking_baseline) + a seeded draw of
-# 30 of the 36 raw "cooking - corn" successes (see
+# 30 of the store's 36 "cooking - corn" episodes (see
 # fetch_droid_language_stats.py). expected_sha256 pins the resolved set --
 # run `python scripts/pin_selection.py data=cooking_baseline_corn` to
 # (re)compute it after any change.
@@ -21,21 +16,3 @@ selection:
     - task: "cooking - corn"
       count: 30
   expected_sha256: "9b0e1f2105535e56861703dd88e545e2d349a76051372efe89ab6425b7f27c10"
-shape_meta:
-  obs:
-    wrist_image_left:
-      shape: [180, 320, 3]
-      type: rgb
-      channel_order: rgb
-    exterior_image_1_left:
-      shape: [180, 320, 3]
-      type: rgb
-      channel_order: rgb
-    joint_positions:
-      shape: [7]
-      type: low_dim
-    gripper_position:
-      shape: [1]
-      type: low_dim
-  action:
-    shape: [8]

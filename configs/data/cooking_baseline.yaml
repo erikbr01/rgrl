@@ -1,17 +1,11 @@
+defaults:
+  - cooking_baseline_store
+  - _self_
+
 name: cooking_baseline
-# Cooking store converted locally from the raw DROID SVOs (all successful
-# "cooking" sessions, 203 raw -> 201 after --skip-corrupt) with
-# policy_graphs' convert_droid_data.py (3 cameras: wrist_image_left,
-# wrist_image_right, exterior_image_1_left; joint_velocity; 180x320; fps15;
-# crf23; untrimmed -- no trim_droid_idle_beginnings.py pass). The baseline
-# trains on a single wrist camera (wrist_image_left) + the exterior view;
-# shape_meta below selects the subset.
-store_path: ${oc.env:RGRL_DATA_ROOT,/home/hardware/code/erik/rgrl}/training_data
-dataset_id: droid_cooking_local_v1
-abs_action: false
-rename: {}
-# Seed-42 draw of 200 of the 201 successful "cooking" episodes. expected_sha256
-# pins the resolved episode-id set against silent drift; run
+# Seed-42 draw of 200 of the 201 successful "cooking" episodes (203 raw ->
+# 201 after --skip-corrupt). expected_sha256 pins the resolved episode-id set
+# against silent drift; run
 # `python scripts/pin_selection.py data=cooking_baseline` to (re)compute it.
 selection:
   seed: 42
@@ -20,21 +14,3 @@ selection:
       count: 200
   count: 200
   expected_sha256: "68e27c6ebad1b6d2230d0c6e41bfb1d9eae95fc54f04c969dca20e2285ec46cf"
-shape_meta:
-  obs:
-    wrist_image_left:
-      shape: [180, 320, 3]
-      type: rgb
-      channel_order: rgb
-    exterior_image_1_left:
-      shape: [180, 320, 3]
-      type: rgb
-      channel_order: rgb
-    joint_positions:
-      shape: [7]
-      type: low_dim
-    gripper_position:
-      shape: [1]
-      type: low_dim
-  action:
-    shape: [8]
