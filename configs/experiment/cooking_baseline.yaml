@@ -11,17 +11,11 @@ defaults:
 training:
   wandb_project: cooking-droid
   wandb_name: cooking_baseline_dit_local_disk
-  # The 200-episode/2-camera cooking store is ~50GB uncompressed -- bigger
-  # than both this box's 30GB host RAM and its GPU's 32GB VRAM, so neither
-  # cuda_resident nor shared_memory (the droid.yaml default) can hold it
-  # resident. training/droid_disk overrides data_mode to stream/decode from
-  # disk per sample instead (see rgrl/dataset.py's DiskSequenceDataset) with
-  # dataloader_workers/prefetch_factor cranked up to hide that latency.
-  # batch 256 (same as prepare_tray) -- data residency no longer competes
-  # with activations for VRAM once the store isn't cuda_resident/shared_memory.
+  # The ~50GB 200-episode/2-camera store fits neither cuda_resident nor
+  # shared_memory, hence training/droid_disk. Nothing resident means batch 256
+  # is not competing with the store for VRAM.
   batch_size: 256
 
 # runs/cooking_baseline_dit already holds an earlier baseline's checkpoints
-# (a different store/data_mode) -- this run name keeps that lineage
-# untouched rather than colliding with it.
+# (a different store/data_mode) -- this run name keeps that lineage untouched.
 out: runs/cooking_baseline_dit_local_disk

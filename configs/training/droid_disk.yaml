@@ -1,53 +1,18 @@
-# DROID DiT flow recipe for a store too large for both this box's VRAM and
-# host RAM to hold resident (see configs/data/cooking_baseline.yaml -- the
-# 200-episode/2-camera selection is ~50GB uncompressed, above both this box's
-# 30GB RAM and its GPU's 32GB VRAM). data_mode: disk decodes each sample's
-# obs-horizon window on demand from the on-disk VideoStore instead of ever
-# materializing the split as one resident tensor (see rgrl/dataset.py's
-# DiskSequenceDataset).
+# DROID DiT flow for a store too large to hold resident in either host RAM or
+# VRAM: data_mode=disk decodes each sample's obs-horizon window on demand from
+# the on-disk VideoStore (rgrl/dataset.py's DiskSequenceDataset) rather than
+# materializing the split as one resident tensor.
 #
-# Two fixes got this to compute-bound (sustained ~8 it/s, ~100% GPU util,
-# data time ~0% of step) at the settings below:
+# Requires the `video` extra -- without torchcodec the decode path silently
+# falls back to PyAV (~2.5x slower per frame) with nothing but an import-time
+# log line to notice. See README "Data loading" for the install and for the
+# full tuning rationale behind the knobs below.
 #
-# 1. DiskSequenceDataset bug: it originally fetched the *union* frame range
-#    per episode per batch. Under true random sampling over only 200
-#    episodes, a handful of a batch's 256 samples landing in the same
-#    ~700-frame episode at far-apart timesteps made that union span nearly
-#    the whole episode -- measured one batch needing 512 frames but the
-#    union fetch decoding 22,640 (44x). Fixed by only taking the union when
-#    it's actually close to what's needed, else fetching each row's own
-#    small window individually.
-# 2. robo_dataset's video backend was silently running its documented
-#    "pyav ... slowest; correct" fallback path because torchcodec wasn't
-#    importable in this venv -- decode backend is auto-detected once per
-#    process (robo_dataset/backends/video.py:_pick_decoder_backend) with no
-#    config flag, so there was nothing to notice was misconfigured. Fixing
-#    the install (see below) flips it to "modern" (torchcodec) automatically,
-#    ~2.5x faster per frame in direct comparison (0.30ms vs ~0.75ms). This
-#    is what actually removed the bottleneck -- every worker-count/prefetch/
-#    decoder-cache tuning tried before this could only work around a slow
-#    decode path, not fix it.
-#
-# torchcodec install (this venv had neither piece, needed both):
-#   sudo apt install libavdevice60   # system FFmpeg lib torchcodec dlopens;
-#                                     # avutil/avformat/avcodec were already
-#                                     # present (pulled in by something else)
-#                                     # but avdevice specifically wasn't.
-#   uv pip install --python .venv/bin/python \
-#       --index-url https://download.pytorch.org/whl/cu128 torchcodec
-#     # plain `uv pip install torchcodec` resolves the latest (0.15.0),
-#     # which expects CUDA 13's libnvrtc.so.13 -- mismatched against this
-#     # venv's torch 2.11.0+cu128. The cu128 index gives a version-matched
-#     # build (resolved to 0.11.1+cu128 here).
-#
-# dataloader_workers=8/prefetch_factor=3/max_decoders=450 predate the
-# torchcodec fix (found while still bottlenecked on PyAV) but remain good
-# defaults -- decoder-cache size still matters some (max_decoders=450 covers
-# the full 200-episode x 2-camera working set so decoders never get evicted
-# once warm), and this worker count is still the safe ceiling on this
-# 30GB-RAM box (10-12 workers OOM/hit av.error.BlockingIOError under memory
-# pressure regardless of decode speed). There's no longer a need to push
-# either further now that the pipeline is compute-, not data-, bound.
+# workers=8 is the safe ceiling on a 30GB-RAM box (10-12 hit BlockingIOError
+# under memory pressure); max_decoders should cover the whole
+# n_episodes x n_image_keys working set so decoders are never evicted once
+# warm -- 450 fits the 200-episode/2-camera baseline, so raise it for larger
+# selections.
 defaults:
   - droid
   - _self_
