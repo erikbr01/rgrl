@@ -38,7 +38,11 @@ from rgrl.store import EPISODE_VIEW_FILE, EpisodeStore, write_sidecars
 log = logging.getLogger(__name__)
 
 _MANIFEST_FILE = "cache_manifest.json"
-_EXPECTED_FILES = ["meta.json", "rgrl_meta.json", "stats.json", _MANIFEST_FILE]
+_EXPECTED_FILES = ["rgrl_meta.json", "stats.json", _MANIFEST_FILE]
+# The backend's own metadata, whose name depends on the store format: zarr and
+# video keep a top-level meta.json, LeRobot a meta/ directory (info.json etc.).
+# Exactly one has to be present for the cache dir to be openable.
+_EXPECTED_STORE_META = ["meta.json", "meta"]
 _CONVERSION_SCHEMA_VERSION = 2
 
 
@@ -385,6 +389,8 @@ def _is_short_prefix_collision(cache_dir: Path, expected_doc: dict) -> bool:
 
 def _verify_cache(cache_dir: Path, expected_doc: dict) -> None:
     missing = [f for f in _EXPECTED_FILES if not (cache_dir / f).exists()]
+    if not any((cache_dir / f).exists() for f in _EXPECTED_STORE_META):
+        missing.append(" or ".join(_EXPECTED_STORE_META))
     if expected_doc["source_cfg"].get("episode_ids") is not None:
         if not (cache_dir / EPISODE_VIEW_FILE).exists():
             missing.append(EPISODE_VIEW_FILE)
@@ -579,7 +585,10 @@ def _convert_from_store(
     # video-backed stores keep the same information in meta.json. A logical
     # EpisodeView is applied by rgrl.store.EpisodeStore after opening these
     # physical links.
-    for entry in ("meta.json", "episode_ends.npy", "videos", "data"):
+    # "meta" (a directory) is LeRobot's metadata home — info.json lives there,
+    # and store_factory.detect_format keys on it, so the cache dir is
+    # unopenable without it.
+    for entry in ("meta.json", "meta", "episode_ends.npy", "videos", "data"):
         src_entry = store_path / entry
         if src_entry.exists():
             (out / entry).symlink_to(src_entry.resolve())
@@ -607,10 +616,15 @@ def _convert_from_store(
         for k in target_shape_meta["obs"]
         if k not in image_keys
     }
-    stats_keys["action"] = dst.get_sequence("action", 0, n).astype(np.float32)
+    action_key = source_cfg.get("action_key", "action")
+    stats_keys["action"] = dst.get_sequence(action_key, 0, n).astype(np.float32)
 
     meta_path = store_path / "meta.json"
     fps = json.loads(meta_path.read_text()).get("fps") if meta_path.exists() else None
+    if fps is None:
+        # LeRobot keeps its metadata (including fps) under meta/info.json.
+        info_path = store_path / "meta" / "info.json"
+        fps = json.loads(info_path.read_text()).get("fps") if info_path.exists() else None
 
     write_sidecars(
         out,
@@ -623,4 +637,5 @@ def _convert_from_store(
         fps=fps,
         norm_method=source_cfg.get("norm_method", "minmax"),
         num_workers=num_workers,
+        action_key=action_key,
     )
