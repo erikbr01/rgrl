@@ -24,8 +24,19 @@ hydra:
 
 out: runs/dev
 
+# Where load_store materializes converted stores. Relative paths are resolved
+# against the invocation dir (hydra chdir is off), which puts the cache on
+# whatever filesystem you launched from -- point it at a data disk when the
+# conversion is large or the boot drive is tight.
+cache_root: data/cache
+
 # Processes used to fit normalizer stats on a cache miss (one-time conversion).
 # The single source for this knob. Deliberately top-level, not under `data`:
 # it's an orchestration knob, so it must not enter the conversion cache hash.
 # null -> one process per key, capped at the CPU count.
 stats_workers: null
+
+# Threads used to re-encode episodes on a cache miss (one-time conversion).
+# Like stats_workers this is orchestration, not data identity, so it stays
+# top-level and out of the conversion-cache hash. 1 keeps the old serial path.
+convert_workers: 1

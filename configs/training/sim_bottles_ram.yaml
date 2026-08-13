@@ -1,0 +1,22 @@
+# sim-bottles recipe. The conversion cache holds the camera at 168x224 (see
+# target/sim_bottles.yaml), so 200 episodes are ~21GB -- too big for VRAM
+# alongside the model, but comfortably resident in host RAM. shared_memory keeps
+# the whole split there and drops per-sample video decode entirely, which was
+# 72-76% of step time when reading the native 480x640 dataset with data_mode=disk.
+defaults:
+  - default
+  - _self_
+
+batch_size: 256
+data_mode: shared_memory
+dataloader_workers: 0
+steps: 30000
+save_every: 10000
+val_every: 5000
+compile_mode: default
+
+# rgrl doesn't clip gradients by default, and under bf16 an occasional spike
+# NaN'd this task intermittently (~2 of 6 launches, always within the first
+# ~100 steps, silently -- the loss just prints nan forever). 10.0 matches
+# ABC-DiT's own OptimConfig for the same task.
+max_grad_norm: 10.0
