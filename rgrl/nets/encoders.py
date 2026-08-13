@@ -97,8 +97,8 @@ class TimmEncoder(nn.Module):
 
     Port of UMI's TimmObsEncoder: build any timm model by name (num_classes=0 ->
     global-pooled features), optionally frozen, with the configured input norm.
-    Patch backbones (e.g. DINOv2 ViT/14) need a fixed square input, so images are
-    resized to ``img_size``. ``num_kp`` is unused (no SpatialSoftmax), accepted
+    Patch backbones (e.g. DINOv2 ViT/14) need a fixed grid, so images are resized
+    to ``img_size`` -- an int for a square, or (h, w) to keep the true aspect. ``num_kp`` is unused (no SpatialSoftmax), accepted
     only for a uniform ObsEncoder signature.
     """
 
@@ -125,7 +125,6 @@ class TimmEncoder(nn.Module):
             (int(img_size), int(img_size)) if isinstance(img_size, (int, float))
             else (int(img_size[0]), int(img_size[1]))
         )
-        self.img_size = self.img_hw[0]  # retained for checkpoint/config compat
         try:
             model = timm.create_model(
                 model_name, pretrained=pretrained, num_classes=0, img_size=self.img_hw

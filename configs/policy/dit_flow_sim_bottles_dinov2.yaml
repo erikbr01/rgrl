@@ -6,7 +6,7 @@
 # on this task localized entirely to enc.encoders.*.backbone.* (the ResNet's
 # BatchNorm->GroupNorm path), which this replaces outright.
 #
-# img_size 224 = 16 patches of 14. frozen_backbone stays FALSE to match the
+# frozen_backbone stays FALSE to match the
 # ResNet baseline, which trains its encoder end to end. Freezing would also
 # confound any comparison against the non-finite-gradient failure, since it
 # removes backbone gradients altogether rather than replacing the encoder.
@@ -17,5 +17,7 @@ defaults:
 backbone: vit_small_patch14_dinov2.lvd142m
 pretrained_backbone: true
 image_norm: imagenet
-vit_img_size: 224
+# Aspect-preserving and both /14: the crop is 152x208, so a square 224 would
+# upsample every image and cost 256 patches instead of 165.
+vit_img_size: [154, 210]
 frozen_backbone: false

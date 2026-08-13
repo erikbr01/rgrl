@@ -38,5 +38,8 @@ stats_workers: null
 
 # Threads used to re-encode episodes on a cache miss (one-time conversion).
 # Like stats_workers this is orchestration, not data identity, so it stays
-# top-level and out of the conversion-cache hash. 1 keeps the old serial path.
-convert_workers: 1
+# top-level and out of the conversion-cache hash. Decode/resize/encode all
+# release the GIL, and there is no pre-existing serial path to preserve here
+# (the store source used to only symlink), so this defaults to parallel:
+# 2.4M frames is ~1.5h on one core vs ~10min at 12.
+convert_workers: 8

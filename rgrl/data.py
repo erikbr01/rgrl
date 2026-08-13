@@ -625,7 +625,7 @@ def _rewrite_from_store(
     )
     write_sidecars(
         out,
-        stats_keys=dict(stats_accum),
+        stats_keys=stats_accum,
         env_meta={
             **source_cfg.get("env_meta", {}),
             "abs_action": source_cfg.get("abs_action", False),
@@ -702,11 +702,6 @@ def _convert_from_store(
         )
         return
 
-    if rename:
-        raise NotImplementedError(
-            "_convert_from_store can't rename keys without rewriting the store "
-            f"(rename={rename}) — use the `path` (HDF5) source kind instead"
-        )
 
     out.mkdir(parents=True, exist_ok=True)
     # ZarrStore reads episode_ends.npy as a required top-level file;

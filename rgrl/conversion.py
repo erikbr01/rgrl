@@ -67,7 +67,7 @@ def _resize_op(size: tuple[int, int]) -> Callable[[np.ndarray], np.ndarray]:
 
         out = np.empty((a.shape[0], h, w, a.shape[3]), dtype=a.dtype)
         for i in range(a.shape[0]):
-            out[i] = cv2.resize(a[i], (w, h), interpolation=cv2.INTER_AREA)
+            cv2.resize(a[i], (w, h), dst=out[i], interpolation=cv2.INTER_AREA)
         return out
 
     return op

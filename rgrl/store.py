@@ -147,6 +147,15 @@ class EpisodeStore:
         stats_path = self.path / _STATS_FILE
         self.stats = json.loads(stats_path.read_text()) if stats_path.exists() else {}
 
+    def _phys(self, key: str) -> str:
+        """The underlying store's name for an rgrl-facing key.
+
+        A store whose action column is spelled differently (LeRobot datasets
+        commonly use "actions") records it in rgrl_meta.json; every read goes
+        through here so "action" is the only name used above this boundary.
+        """
+        return self._action_key if key == "action" else key
+
     def _checked_key_spec(self, key: str, spec: dict, physical: str | None = None) -> "KeySpec":
         """`physical` names the underlying store key when it differs from the
         rgrl-facing one (see `action_key`); errors still report `key`."""
@@ -202,10 +211,7 @@ class EpisodeStore:
         # non-video backends too — a thread pool over near-free zarr reads
         # costs nothing.
         #
-        # A store whose action column has another physical name (LeRobot
-        # datasets commonly use "actions") records it in rgrl_meta.json; rgrl
-        # refers to it as "action" everywhere above this boundary.
-        key = self._action_key if key == "action" else key
+        key = self._phys(key)
         # episodes: which episode indices to load, in order, default the whole
         # store — the dataset classes use this so a train/val split loads only
         # its own episodes' frames, not a full duplicate copy of the other
@@ -237,8 +243,9 @@ class EpisodeStore:
         aggregate across episodes. For on-demand access to a single sample's
         window (e.g. DiskSequenceDataset's per-sample obs horizon) so a split
         that doesn't fit resident never needs a full in-memory copy."""
-        key = self._action_key if key == "action" else key
-        return np.ascontiguousarray(self._robo.get_frames(episode_idx, key, start, end))
+        return np.ascontiguousarray(
+            self._robo.get_frames(episode_idx, self._phys(key), start, end)
+        )
 
     def episode_bounds(self) -> np.ndarray:
         """(num_episodes, 2) array of [start, end) frame indices."""
