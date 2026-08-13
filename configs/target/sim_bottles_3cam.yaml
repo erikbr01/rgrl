@@ -1,0 +1,22 @@
+# 3-camera shape_meta the policy consumes (see data/sim_bottles_3cam.yaml).
+# 168x224 is what abc_minimal's MuJoCo-Warp evaluator renders, so load_store
+# bakes that resolution into the conversion cache and eval frames need no
+# resampling round trip.
+obs:
+  top_camera-images-rgb:
+    shape: [168, 224, 3]
+    type: rgb
+    channel_order: rgb
+  left_camera-images-rgb:
+    shape: [168, 224, 3]
+    type: rgb
+    channel_order: rgb
+  right_camera-images-rgb:
+    shape: [168, 224, 3]
+    type: rgb
+    channel_order: rgb
+  state:
+    shape: [14]
+    type: low_dim
+action:
+  shape: [14]

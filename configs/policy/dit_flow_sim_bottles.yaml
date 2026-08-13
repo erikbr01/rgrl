@@ -1,0 +1,24 @@
+# ABC-style DiT flow for the WARP-RM sim-bottles task.
+#
+# n_action_steps=16 because abc_minimal's evaluator executes
+# actions[:execute_chunk_dim] with execute_chunk_dim=15 (SimEvalConfig) -- the
+# stock 8 would starve it. horizon grows to 24 to satisfy
+# obs_horizon - 1 + n_action_steps <= horizon, leaving max_action_prefix = 7.
+#
+# No ResizeTransform here: target/sim_bottles.yaml declares the camera at
+# 168x224, so load_store bakes that resolution into the conversion cache and the
+# store is already native at the evaluator's render size. Crop is the usual
+# augmentation margin.
+defaults:
+  - dit_flow
+  - _self_
+
+horizon: 24
+n_action_steps: 16
+max_action_prefix: 7
+data_transforms:
+  - _target_: rgrl.transforms.CropTransform
+    _partial_: true
+    size: [152, 208]
+    pad: 0
+    per_timestep: true

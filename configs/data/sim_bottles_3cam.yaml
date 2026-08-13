@@ -1,0 +1,34 @@
+# WARP-RM sim-bottles, all 2438 episodes, ALL THREE cameras.
+#
+# The single top camera is a handicap: the demos carry left/right wrist views
+# that the overhead view cannot substitute for at grasp time, and the reference
+# pi0 policy for this task consumes all three. Kept separate from
+# data/sim_bottles.yaml so the 1-camera conversion cache stays valid.
+#
+# target/sim_bottles_3cam.yaml declares 168x224, so load_store re-encodes once
+# at the evaluator's render resolution (~12.6GB on disk for three cameras);
+# train with training=sim_bottles_full (data_mode=disk).
+name: sim_bottles_3cam
+store_path: /mnt/ssdB/erik/policy_graphs/data/warp_rm/sim-bottles-mjwarp-v1
+abs_action: false
+rename: {}
+action_key: actions
+shape_meta:
+  obs:
+    top_camera-images-rgb:
+      shape: [480, 640, 3]
+      type: rgb
+      channel_order: rgb
+    left_camera-images-rgb:
+      shape: [480, 640, 3]
+      type: rgb
+      channel_order: rgb
+    right_camera-images-rgb:
+      shape: [480, 640, 3]
+      type: rgb
+      channel_order: rgb
+    state:
+      shape: [14]
+      type: low_dim
+  action:
+    shape: [14]
