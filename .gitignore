@@ -8,6 +8,7 @@ build/
 
 # Environments and local secrets
 .venv/
+.venv
 venv/
 .env
 .env.*

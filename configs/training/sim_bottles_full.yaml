@@ -7,10 +7,11 @@
 # data_mode=disk run was data-bound (72-76% of step time) only because it was
 # decoding native 480x640 and shrinking on GPU.
 #
-# max_decoders is PER WORKER PROCESS, so the budget is per-worker, not global:
-# 2500 x 8 workers would authorize ~20k live torchcodec decoders (each an ffmpeg
-# context + fd over a ~500MB file), which video.py records as failing with
-# "Resource temporarily unavailable" well below that.
+# max_decoders is PER WORKER PROCESS. video.py sizes this to the episodes x
+# video-keys working set (capped 1024) because under random sampling a cache
+# below the working set thrashes -- every sample reopens a decoder, ~3x
+# throughput. 1024 is that cap; raise ulimit -n if fds become the binding
+# constraint rather than cutting the cache.
 defaults:
   - default
   - _self_
@@ -19,7 +20,7 @@ batch_size: 256
 data_mode: disk
 dataloader_workers: 8
 prefetch_factor: 3
-max_decoders: 300
+max_decoders: 1024
 steps: 100000
 save_every: 25000
 val_every: 10000
