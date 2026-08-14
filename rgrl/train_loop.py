@@ -32,6 +32,7 @@ from omegaconf import OmegaConf
 from torch import nn
 
 from rgrl.dataset import VAL_SELECTIONS, Windows, build_dataset
+from rgrl.diagnostics import TrainDiagnostics
 from rgrl.ema import EMA
 from rgrl.logutil import log_to_file
 from rgrl.profiler import SectionProfiler, chrome_trace
@@ -133,6 +134,19 @@ class TrainConfig:
     # gradient spike has nothing to clamp it and NaNs the run, intermittently
     # and silently (ABC-DiT's own recipe clips at 10.0).
     max_grad_norm: float | None = None
+    # Optimization diagnostics -> <out>/diagnostics.jsonl (see rgrl.diagnostics).
+    # On by default: the per-step part is a few small reductions, and without it a
+    # run that destabilizes has to be repeated from scratch to learn anything
+    # about why. Set False to restore the historical log-only behaviour.
+    grad_diag: bool = True
+    # Cadence for the expensive part (per-module grad/update/trust ratios).
+    # 0 disables it, leaving only the per-step global norms. None follows
+    # log_every, which keeps diagnostics aligned with the loss line.
+    diag_every: int | None = None
+    # Record a detailed snapshot when the grad norm exceeds this multiple of its
+    # running EMA, regardless of diag_every -- divergence onsets are single steps
+    # and a fixed cadence walks straight past them.
+    diag_spike_factor: float = 4.0
     # cuDNN conv-algorithm autotuning. True (default) keeps the historical
     # behaviour; False trades some throughput for reproducible kernel selection.
     cudnn_benchmark: bool = True
@@ -284,6 +298,12 @@ def _resume_spec(
         "prefetch_factor",
         "max_decoders",
         "device_memory_reserve_gb",
+        # Diagnostics only observe. With clipping off, the norm is measured via an
+        # infinite threshold, which leaves gradients untouched -- so toggling
+        # these must not invalidate a resume fingerprint.
+        "grad_diag",
+        "diag_every",
+        "diag_spike_factor",
     }:
         training.pop(key, None)
     return {
@@ -741,6 +761,16 @@ def _train(
 
     _debug_finite = os.environ.get("RGRL_DEBUG_FINITE") == "1"
 
+    diag = TrainDiagnostics(
+        out,
+        policy.named_parameters(),
+        opt,
+        diag_every=recipe.log_every if cfg.diag_every is None else cfg.diag_every,
+        spike_factor=cfg.diag_spike_factor,
+        max_grad_norm=cfg.max_grad_norm,
+        enabled=cfg.grad_diag,
+    )
+
     def _first_bad(step: int, batch, loss, phase: str, pre_bad_w) -> None:
         """Report the first non-finite event with enough context to localize it."""
         lines = [f"\n=== RGRL_DEBUG_FINITE: non-finite at step {step} during {phase} ==="]
@@ -784,6 +814,7 @@ def _train(
 
     def one_step(step: int) -> None:
         nonlocal loss_sum, loss_count
+        diag.before_step(step)
         with prof("data"):
             batch = next(batches)
         pre_bad_w = []
@@ -803,8 +834,15 @@ def _train(
                 _first_bad(step, batch, loss, "backward", pre_bad_w)
                 raise SystemExit(f"stopping at first non-finite grad (step {step})")
         with prof("opt"):
+            total_norm = None
             if cfg.max_grad_norm is not None:
-                torch.nn.utils.clip_grad_norm_(policy.parameters(), cfg.max_grad_norm)
+                # Returned norm is PRE-clip, i.e. exactly the diagnostic we want,
+                # for free.
+                total_norm = torch.nn.utils.clip_grad_norm_(
+                    policy.parameters(), cfg.max_grad_norm
+                )
+            if cfg.grad_diag:
+                diag.record_grad_norm(step, total_norm)
             opt.step()
             opt.zero_grad(set_to_none=True)
             sched.step()
@@ -886,17 +924,37 @@ def _train(
             breakdown, timings = prof.report_and_reset()
             samples_seen = step * cfg.batch_size
             epoch = samples_seen / data.num_samples
+            drec = diag.flush(step, avg, sched.get_last_lr()[0])
+            if drec:
+                extra = (
+                    f" gnorm {drec['grad_norm_mean']:.3g}/max {drec['grad_norm_max']:.3g}"
+                    f" clip {drec['clip_frac']:.2f}"
+                )
+                if drec["n_nonfinite_grad"]:
+                    extra += f" NONFINITE {drec['n_nonfinite_grad']}"
+                if drec["n_spikes"]:
+                    extra += f" spikes {drec['n_spikes']}"
+                if (d := drec.get("detail")) and d.get("update_ratio") is not None:
+                    extra += f" upd/param {d['update_ratio']:.2e}"
+            else:
+                extra = ""
             log.info(
                 f"step {step:>7}/{recipe.steps} samples {samples_seen:>10} "
                 f"epoch {epoch:6.2f} loss {avg:.4f} "
                 f"lr {sched.get_last_lr()[0]:.2e} "
                 f"{iterations_per_second:6.1f} it/s {samples_per_second / 1000:6.1f}k samples/s "
                 f"eta {eta_min:5.1f}m"
+                + extra
                 + (f"  [{breakdown}]" if breakdown else "")
             )
             if run:
                 run.log(
                     {
+                        **{
+                            f"diag/{k}": v
+                            for k, v in (drec or {}).items()
+                            if isinstance(v, (int, float))
+                        },
                         "train_loss": avg,
                         "lr": sched.get_last_lr()[0],
                         "it_per_s": iterations_per_second,
