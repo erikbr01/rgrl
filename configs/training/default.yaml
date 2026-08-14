@@ -32,6 +32,12 @@ bf16: true
 max_grad_norm: null
 cudnn_benchmark: true
 deterministic: false
+# Optimization diagnostics -> <out>/diagnostics.jsonl (see rgrl/diagnostics.py,
+# summarize with scripts/summarize_diagnostics.py). diag_every: null follows
+# log_every; 0 keeps only the cheap per-step global norms.
+grad_diag: true
+diag_every: null
+diag_spike_factor: 4.0
 ema_power: 0.75
 device: cuda
 wandb_project: null
