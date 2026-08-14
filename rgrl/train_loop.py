@@ -128,10 +128,13 @@ class TrainConfig:
     # cuDNN conv-algorithm autotuning. True (default) keeps the historical
     # behaviour; False trades some throughput for reproducible kernel selection.
     cudnn_benchmark: bool = True
-    # Run-to-run bit reproducibility. Today two runs of one config + seed do NOT
-    # agree (measured: loss 0.2273 vs 0.2282 at step 200), which makes any
-    # numerical bug unfalsifiable -- you cannot tell a real regression from
-    # kernel-selection noise. Setting this pins deterministic kernels
+    # Run-to-run bit reproducibility. Two runs of one config + seed do NOT agree
+    # (measured: loss 0.2273 vs 0.2282 at step 200), which makes any numerical bug
+    # unfalsifiable -- you cannot tell a real regression from kernel-selection
+    # noise. cudnn_benchmark=False removes most of it but NOT all: over a 47k-step
+    # window it held bit-for-bit only ~600 steps before drifting, and the drift
+    # decided whether a run destabilized (loss 0.153) or stayed healthy (0.026).
+    # Setting this pins deterministic kernels
     # (cudnn.deterministic, use_deterministic_algorithms) on top of
     # cudnn_benchmark=False. Slower; needs CUBLAS_WORKSPACE_CONFIG=:4096:8 in the
     # environment, which must be set before CUDA initialises.

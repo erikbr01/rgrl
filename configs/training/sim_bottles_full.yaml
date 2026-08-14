@@ -27,9 +27,23 @@ val_every: 10000
 compile_mode: default
 max_grad_norm: 10.0
 
-# cuDNN conv autotuning is THE source of run-to-run nondeterminism on this stack:
-# measured A/B, cudnn_benchmark=true diverges from an identical run by step ~325,
-# while false is bit-identical over every logged point (deterministic=true + no
-# compile is also reproducible but costs much more). Off by default here so any
-# numerical failure in these runs can actually be reproduced and bisected.
+# cuDNN conv autotuning is the LARGEST source of run-to-run nondeterminism here:
+# measured A/B, cudnn_benchmark=true diverges from an identical run by step ~325;
+# false agrees bit-for-bit over a few hundred steps.
+#
+# It is NOT sufficient at long horizons, which an earlier version of this comment
+# got wrong by generalizing from that short A/B. Measured over 47k steps: a run
+# resumed from base_500k's step-100000 checkpoint with this exact config matched
+# the original bit-for-bit only to step ~100600, then drifted -- and by step 147k
+# the original had destabilized to loss 0.153 while the replay sat at 0.026. Same
+# weights, same data order, same seed; different outcome. cudnn_benchmark=false
+# pins which conv algorithm is CHOSEN, not whether that algorithm is
+# deterministic, so nondeterministic reductions still differ run to run and a
+# knife-edge instability amplifies them into divergence-or-not.
+#
+# Consequence: this config cannot reproduce its own failures, so a stability bug
+# cannot be bisected. Use deterministic=true (plus CUBLAS_WORKSPACE_CONFIG=:4096:8
+# in the environment, set before CUDA initialises) when that matters. Its
+# throughput cost on this stack is UNMEASURED -- do not repeat the earlier
+# mistake of asserting it without a number.
 cudnn_benchmark: false
