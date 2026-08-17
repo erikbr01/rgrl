@@ -69,18 +69,34 @@ class TimestepEmbedder(nn.Module):
 
 
 class DiTAttention(nn.Module):
-    """Self-attention over action tokens (timm-equivalent, qkv_bias=True)."""
+    """Self-attention over action tokens (timm-equivalent, qkv_bias=True).
 
-    def __init__(self, dim: int, num_heads: int):
+    qk_norm applies RMSNorm to q and k before the dot product, bounding the
+    attention logits so they cannot grow without limit. Default False, which is
+    what ABC's reference DiT does (abc_minimal/dit.py:DiTAttention is identical
+    to this class without it) -- so unbounded logits are NOT by themselves the
+    reason runs here destabilize, and this is an experiment rather than a
+    known-missing piece. It is offered because sim-bottles runs show net.blocks
+    gradients growing ~200x into a 1e5 global norm, which is the signature
+    logit growth would produce.
+    """
+
+    def __init__(self, dim: int, num_heads: int, qk_norm: bool = False):
         super().__init__()
         self.num_heads = num_heads
         self.qkv = nn.Linear(dim, dim * 3, bias=True)
         self.proj = nn.Linear(dim, dim, bias=True)
+        head_dim = dim // num_heads
+        # Per-head RMSNorm, matching timm's qk_norm placement (after the head
+        # split, before the dot product).
+        self.q_norm = nn.RMSNorm(head_dim) if qk_norm else nn.Identity()
+        self.k_norm = nn.RMSNorm(head_dim) if qk_norm else nn.Identity()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, N, C = x.shape
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads)
         q, k, v = qkv.permute(2, 0, 3, 1, 4).unbind(0)
+        q, k = self.q_norm(q), self.k_norm(k)
         x = F.scaled_dot_product_attention(q, k, v)
         return self.proj(x.transpose(1, 2).reshape(B, N, C))
 
@@ -101,10 +117,12 @@ class DiTBlock(nn.Module):
     gating its vision cross-attention, which rgrl conditions via the flat
     obs vector instead)."""
 
-    def __init__(self, hidden_size: int, num_heads: int, mlp_ratio: float = 4.0):
+    def __init__(
+        self, hidden_size: int, num_heads: int, mlp_ratio: float = 4.0, qk_norm: bool = False
+    ):
         super().__init__()
         self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
-        self.attn = DiTAttention(hidden_size, num_heads)
+        self.attn = DiTAttention(hidden_size, num_heads, qk_norm=qk_norm)
         self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.mlp = DiTMlp(hidden_size, int(hidden_size * mlp_ratio))
         self.adaLN_modulation = nn.Sequential(
@@ -146,6 +164,7 @@ class ActionDiT(nn.Module):
         depth: int,
         num_heads: int,
         mlp_ratio: float = 4.0,
+        qk_norm: bool = False,
     ):
         super().__init__()
         self.y_embedder = nn.Linear(action_dim, hidden_size)
@@ -153,7 +172,8 @@ class ActionDiT(nn.Module):
             "pos_embed", sincos_pos_embed_1d(hidden_size, chunk_length)[None], persistent=False
         )
         self.blocks = nn.ModuleList(
-            DiTBlock(hidden_size, num_heads, mlp_ratio) for _ in range(depth)
+            DiTBlock(hidden_size, num_heads, mlp_ratio, qk_norm=qk_norm)
+            for _ in range(depth)
         )
         self.final_layer = FinalLayer(hidden_size, action_dim)
         self._init_weights()
