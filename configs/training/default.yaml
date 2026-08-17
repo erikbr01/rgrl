@@ -29,6 +29,8 @@ compile: true
 # is configured separately and unaffected.
 compile_mode: max-autotune
 bf16: true
+# Post-warmup LR shape: cosine (decay to 0) | constant (ABC's reference recipe).
+lr_schedule: cosine
 max_grad_norm: null
 cudnn_benchmark: true
 deterministic: false
