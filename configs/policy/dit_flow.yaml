@@ -10,6 +10,8 @@ hidden_size: 512
 depth: 8
 num_heads: 8
 mlp_ratio: 4.0
+# RMSNorm on q/k in DiT self-attention. false matches ABC's reference DiT.
+qk_norm: false
 num_kp: 32
 # Opt-in modeling change: share one vision backbone across camera keys.
 # This reduces parameters/optimizer state, but is not checkpoint-compatible
