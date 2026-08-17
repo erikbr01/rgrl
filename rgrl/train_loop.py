@@ -41,6 +41,7 @@ log = logging.getLogger(__name__)
 
 CHECKPOINT_SCHEMA_VERSION = 1
 _RESUME_MODES = {"never", "auto", "required", "extend"}
+_LR_SCHEDULES = {"cosine", "constant"}
 # torch.compile modes we expose. All produce the same optimizer update
 # mathematically -- they only trade compile time for kernel selection / graph
 # replay -- so compile_mode is a pure execution knob (excluded from the resume
@@ -65,6 +66,13 @@ class TrainConfig:
     weight_decay: float = 1e-6
     betas: tuple[float, float] = (0.95, 0.999)
     warmup_steps: int = 500
+    # Post-warmup LR shape. "cosine" (default) decays to 0 over the remaining
+    # steps; "constant" holds lr, which is what ABC's reference recipe does
+    # (abc_minimal/config.py:OptimConfig, "linear-warmup-then-constant"). The
+    # distinction matters when reading a late-run loss: under cosine, a run can
+    # look like it stabilized when the LR simply went to zero, which is how
+    # base3cam_500k "recovered" from R^2 -27 to -4.4 over its last 80k steps.
+    lr_schedule: str = "cosine"
     seed: int = 0
     # Seeds validation determinism: the val-loss RNG, and (with
     # val_selection=random) which episodes are held out.
@@ -178,6 +186,10 @@ def resolve_recipe(cfg: TrainConfig) -> ResolvedRecipe:
     warmup_steps = max(0, cfg.warmup_steps)
     if warmup_steps > steps:
         raise ValueError(f"warmup_steps={warmup_steps} is beyond total steps={steps}")
+    if cfg.lr_schedule not in _LR_SCHEDULES:
+        raise ValueError(
+            f"lr_schedule must be one of {sorted(_LR_SCHEDULES)}, got {cfg.lr_schedule!r}"
+        )
     if cfg.resume not in _RESUME_MODES:
         raise ValueError(f"resume must be one of {sorted(_RESUME_MODES)}, got {cfg.resume!r}")
     if cfg.trace_steps < 0:
@@ -652,6 +664,8 @@ def _train(
     def lr_lambda(step: int) -> float:
         if step < recipe.warmup_steps:
             return step / max(1, recipe.warmup_steps)
+        if cfg.lr_schedule == "constant":
+            return 1.0
         progress = (step - recipe.warmup_steps) / max(1, recipe.steps - recipe.warmup_steps)
         return 0.5 * (1 + math.cos(math.pi * min(progress, 1.0)))
 
