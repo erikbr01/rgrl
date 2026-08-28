@@ -1,0 +1,58 @@
+# ABC-bottles recipe. Follows the sim-bottles arm that actually places bottles
+# (experiments/SIM_BOTTLES_RABC_LOG.md, "Training stability" + "Arm comparison"):
+# 3 cameras, qk_norm, clip 1.0, constant LR, deterministic.
+#
+# The conversion cache holds all three cameras at 168x224 (data/abc_bottles.yaml)
+# over the whole task -- ~1,200 episodes, ~1.63M frames at the 15 Hz axis ABC's
+# 30 Hz recording gives at stride=2. Decoded that is ~552 GB (1.63M x 3 cameras x
+# 168x224x3), so it cannot be held resident: shared_memory is out and this streams
+# from disk. That is affordable only because the stored frames are already the
+# policy's working resolution -- the sim-bottles disk arm was data-bound for
+# 72-76% of step time because it decoded native frames and resized on device.
+#
+# Note this differs from an earlier 40-episode sizing of ~33 GB; that was the
+# annotated slice, whose episodes are longer and 30x fewer.
+defaults:
+  - default
+  - _self_
+
+batch_size: 128
+data_mode: disk
+# disk mode decodes per sample, so it needs workers; 0 would serialise every
+# JPEG decode into the training step.
+dataloader_workers: 8
+prefetch_factor: 3
+
+# 80k steps x 128 = 10.24M samples against ~1.6M frames, so ~6.4 epochs -- close
+# to the 4.6 the sim-bottles arm ran, and nothing like the ~200 epochs 80k would
+# have meant on the 20-episode train half this started out on. Still validate
+# often and pick the checkpoint by val loss, because the features are consumed on
+# episodes the policy never sees, so generalisation is what matters.
+steps: 80000
+save_every: 10000
+val_every: 2000
+compile_mode: default
+
+# 1.0, not the 10.0 that sim_bottles_{ram,full}.yaml carry. Those predate the
+# measurement: at 10.0 the clip never fired (clip_frac 0.00-0.01) while gradient
+# spikes reached norm 19.5 against a ~0.3 mean, and every long run destabilized
+# with train and val rising together -- divergence, not overfitting. 1.0 is the
+# value that held.
+max_grad_norm: 1.0
+
+# Constant, not cosine. Under a decaying schedule a diverged run's loss falls
+# again as the LR shrinks, which reads as recovery and hides the instability;
+# constant makes stability legible.
+lr_schedule: constant
+
+# cudnn_benchmark=false pins which conv algorithm is chosen but not whether it is
+# deterministic, so it is not enough at long horizons: a replay from a step-100k
+# checkpoint matched bit-for-bit for only ~600 steps, and that drift alone decided
+# whether the run destabilized (loss 0.153) or stayed healthy (0.026). Since a
+# config that cannot reproduce its own failures cannot have them bisected, pay the
+# ~5-8% throughput for real determinism.
+#
+# Requires CUBLAS_WORKSPACE_CONFIG=:4096:8 in the environment, set before CUDA
+# initialises.
+deterministic: true
+

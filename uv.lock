@@ -1766,6 +1766,8 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "av", marker = "extra == 'dev'" },
+    { name = "av", marker = "extra == 'lerobot'" },
     { name = "crc32c" },
     { name = "h5py" },
     { name = "hydra-core", specifier = ">=1.3" },
@@ -1774,6 +1776,8 @@ requires-dist = [
     { name = "numpy" },
     { name = "omegaconf" },
     { name = "opencv-python" },
+    { name = "pyarrow", marker = "extra == 'dev'" },
+    { name = "pyarrow", marker = "extra == 'lerobot'" },
     { name = "pytest", marker = "extra == 'dev'" },
     { name = "pytest-xdist", marker = "extra == 'dev'" },
     { name = "tfrecord" },
@@ -1782,7 +1786,7 @@ requires-dist = [
     { name = "tqdm" },
     { name = "zarr", specifier = ">=2.12" },
 ]
-provides-extras = ["video", "dev"]
+provides-extras = ["video", "lerobot", "dev"]
 
 [[package]]
 name = "robosuite"

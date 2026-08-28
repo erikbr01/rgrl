@@ -1,0 +1,33 @@
+# ABC-bottles DiT flow: base dit_flow, vision encoder at 168x224.
+#
+# The store already holds frames at 168x224 (data/abc_bottles.yaml), so this
+# ResizeTransform is the documented no-op case -- it exists to declare the
+# backbone's input size to the pipeline, and to make a live camera feed land at
+# the same size the store recorded.
+#
+# A resize rather than DROID's CropTransform, deliberately: the stored frames are
+# letterboxed, because ABC mixes 16:9 and 4:3 episodes, so the two groups have
+# different content extents inside the same frame. A centre crop would eat
+# padding on the 16:9 episodes and real content on the 4:3 ones, reintroducing
+# exactly the per-group difference the letterbox removed. Scaling the whole
+# padded frame treats both identically. Cost: the first stage is not a
+# CropTransform, so the fused uint8 crop fast path does not apply -- irrelevant
+# here, since at native size there is nothing to crop.
+defaults:
+  - dit_flow
+  - _self_
+
+# pretrained_backbone + image_norm=imagenet are inherited from dit_flow.
+# obs_horizon=1: the openpi websocket protocol delivers one observation per
+# action chunk, so obs_horizon=2 was served frames 30 steps apart on the
+# sim-bottles arm. Keep it at 1 so training matches how the policy is served.
+obs_horizon: 1
+
+# qk_norm is not in ABC's reference DiT; the sim-bottles log found it necessary
+# for stability alongside gradient clipping.
+qk_norm: true
+
+data_transforms:
+  - _target_: rgrl.transforms.ResizeTransform
+    _partial_: true  # image_keys is bound by ObsEncoder once the store loads
+    size: [168, 224]

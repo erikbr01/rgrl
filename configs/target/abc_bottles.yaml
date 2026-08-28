@@ -1,0 +1,22 @@
+# shape_meta the policy consumes for ABC bottles (see data/abc_bottles.yaml).
+# All three cameras: the sim-bottles log found cameras to be the binding
+# constraint -- one top view cannot resolve six bottle poses, and 1-cam vs 3-cam
+# differed 6.3x in sim reward at nearly identical val loss.
+obs:
+  top:
+    shape: [168, 224, 3]
+    type: rgb
+    channel_order: rgb
+  left:
+    shape: [168, 224, 3]
+    type: rgb
+    channel_order: rgb
+  right:
+    shape: [168, 224, 3]
+    type: rgb
+    channel_order: rgb
+  state:
+    shape: [14]
+    type: low_dim
+action:
+  shape: [14]

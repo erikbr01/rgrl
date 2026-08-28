@@ -27,7 +27,11 @@ from pathlib import Path
 
 import numpy as np
 
-from robo_dataset.store_factory import open_store
+from robo_dataset.store_factory import detect_format, open_store
+
+#: Backends whose constructor accepts `max_decoders` (an LRU cache of open video
+#: decoders). Everything else must not be handed the kwarg.
+_DECODER_CACHE_FORMATS = {"video", "lerobot", "abc_mcap"}
 
 KIND_IMAGE = "image"
 KIND_STATE = "state"
@@ -100,9 +104,16 @@ class EpisodeStore:
         # per-sample access, e.g. DiskSequenceDataset, where that many
         # simultaneously open decoders each carry their own native decode
         # resources). Non-video backends don't accept the kwarg, so it's
-        # only added when a caller actually asks for it.
+        # only added when a caller actually asks for it -- and only for the
+        # backends that take it. DiskSequenceDataset passes max_decoders
+        # unconditionally, so a non-video store (a zarr cache, say) would
+        # otherwise get a TypeError for an argument that means nothing to it.
+        forward_decoders = (
+            max_decoders is not None
+            and detect_format(str(self.path)) in _DECODER_CACHE_FORMATS
+        )
         self._robo = open_store(
-            str(self.path), **({"max_decoders": max_decoders} if max_decoders is not None else {})
+            str(self.path), **({"max_decoders": max_decoders} if forward_decoders else {})
         )
         view_path = self.path / EPISODE_VIEW_FILE
         self.episode_ids: tuple[int, ...] | None = None
@@ -221,6 +232,10 @@ class EpisodeStore:
         aggregate across episodes. For on-demand access to a single sample's
         window (e.g. DiskSequenceDataset's per-sample obs horizon) so a split
         that doesn't fit resident never needs a full in-memory copy."""
+        # Same logical -> physical action remap as `load`. This is the path
+        # data_mode=disk reads through, so omitting it would make a store whose
+        # action column is not literally named "action" fail only in disk mode.
+        key = self._action_key if key == "action" else key
         return np.ascontiguousarray(self._robo.get_frames(episode_idx, key, start, end))
 
     def episode_bounds(self) -> np.ndarray:
