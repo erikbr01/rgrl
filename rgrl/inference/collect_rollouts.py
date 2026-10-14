@@ -447,7 +447,25 @@ def main(cfg: DictConfig) -> None:
             episode_data = episode_data[record.n_warmup_steps :]
         env.reset()  # go home immediately, while the user labels
 
-        success, note, retry = _prompt_outcome(ep) if use_tty else (None, "", False)
+        # Who decides the outcome is a property of the ENV, not of whether
+        # anyone happens to be watching.
+        #
+        # A sim env evaluates the task's formal success condition
+        # (`supports_success`; robosuite's _check_success, arriving as
+        # BatchRecord.dones), so it decides -- always, TTY or not. Gating that
+        # on isatty() instead would make the same command produce
+        # env-derived labels unattended and human labels interactively, i.e.
+        # labels whose provenance depends on how the run was launched.
+        #
+        # A real robot has no such oracle (supports_success False, dones always
+        # False), so a human decides, and unattended there is no answer to be
+        # had -- which is the honest None rather than a guess.
+        if getattr(env, "supports_success", False):
+            success, note, retry = bool(np.asarray(record.dones).any()), "", False
+        elif use_tty:
+            success, note, retry = _prompt_outcome(ep)
+        else:
+            success, note, retry = None, "", False
         if retry:
             log.info("episode %d: retrying (not saved)", ep)
             episode_data = None  # drop now -- otherwise held alive through the whole retry episode
