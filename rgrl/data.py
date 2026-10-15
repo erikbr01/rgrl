@@ -32,13 +32,17 @@ import h5py
 import numpy as np
 from omegaconf import DictConfig, OmegaConf
 
-from rgrl.conversion import plan_transforms
+from rgrl.conversion import plan_transforms, planned_rewrites
 from rgrl.store import EPISODE_VIEW_FILE, EpisodeStore, write_sidecars
 
 log = logging.getLogger(__name__)
 
 _MANIFEST_FILE = "cache_manifest.json"
-_EXPECTED_FILES = ["meta.json", "rgrl_meta.json", "stats.json", _MANIFEST_FILE]
+_EXPECTED_FILES = ["rgrl_meta.json", "stats.json", _MANIFEST_FILE]
+# The backend's own metadata, whose name depends on the store format: zarr and
+# video keep a top-level meta.json, LeRobot a meta/ directory (info.json etc.).
+# Exactly one has to be present for the cache dir to be openable.
+_EXPECTED_STORE_META = ["meta.json", "meta"]
 _CONVERSION_SCHEMA_VERSION = 2
 
 
@@ -383,9 +387,13 @@ def _is_short_prefix_collision(cache_dir: Path, expected_doc: dict) -> bool:
     return on_disk.get("hash") != expected_doc["hash"]
 
 
-def _verify_cache(cache_dir: Path, expected_doc: dict) -> None:
+def _verify_cache(cache_dir: Path, expected_doc: dict, expect_episode_view: bool = True) -> None:
     missing = [f for f in _EXPECTED_FILES if not (cache_dir / f).exists()]
-    if expected_doc["source_cfg"].get("episode_ids") is not None:
+    if not any((cache_dir / f).exists() for f in _EXPECTED_STORE_META):
+        missing.append(" or ".join(_EXPECTED_STORE_META))
+    # A symlinked cache records its episode subset as a logical view; a
+    # re-encoded one already applied the subset physically, so it has none.
+    if expect_episode_view and expected_doc["source_cfg"].get("episode_ids") is not None:
         if not (cache_dir / EPISODE_VIEW_FILE).exists():
             missing.append(EPISODE_VIEW_FILE)
     if missing:
@@ -409,6 +417,7 @@ def load_store(
     target_shape_meta,
     cache_root: str | Path = "data/cache",
     stats_workers: int | None = None,
+    convert_workers: int = 1,
 ) -> EpisodeStore:
     """Convert (if needed) and open the store for `source_cfg` against
     `target_shape_meta`. Safe to call repeatedly (e.g. once at train time,
@@ -438,9 +447,15 @@ def load_store(
         cache_dir = cache_root / f"{source_cfg['name']}-{doc['hash']}"
     lock_path = cache_root / f".{cache_dir.name}.lock"
 
+    # A re-encode applies any episode subset physically, so unlike the symlink
+    # path it leaves no episode_view.json for _verify_cache to require.
+    expect_view = source_kind == "store" and not planned_rewrites(
+        source_cfg.get("shape_meta", {}), target_shape_meta, source_cfg.get("rename", {})
+    )
+
     with _cache_lock(lock_path):
         if cache_dir.exists():
-            _verify_cache(cache_dir, doc)
+            _verify_cache(cache_dir, doc, expect_episode_view=expect_view)
             log.info(f"[load_store] cache hit {cache_dir}")
             return EpisodeStore(cache_dir, target_shape_meta)
 
@@ -451,7 +466,9 @@ def load_store(
                     f"[load_store] cache miss {cache_dir} -- linking "
                     f"{source_cfg['store_path']}"
                 )
-                _convert_from_store(source_cfg, target_shape_meta, tmp_dir, stats_workers)
+                _convert_from_store(
+                    source_cfg, target_shape_meta, tmp_dir, stats_workers, convert_workers
+                )
             else:
                 log.info(
                     f"[load_store] cache miss {cache_dir} -- converting "
@@ -461,7 +478,7 @@ def load_store(
             (tmp_dir / _MANIFEST_FILE).write_text(
                 json.dumps(doc, indent=1, sort_keys=True)
             )
-            _verify_cache(tmp_dir, doc)
+            _verify_cache(tmp_dir, doc, expect_episode_view=expect_view)
             _fsync_tree(tmp_dir)
             os.replace(tmp_dir, cache_dir)
             _fsync_directory(cache_root)
@@ -529,8 +546,114 @@ def _convert(
     )
 
 
+def _rewrite_from_store(
+    src,
+    source_cfg: dict,
+    target_shape_meta: dict,
+    out: Path,
+    transform,
+    image_keys: list[str],
+    source_key_of: dict[str, str],
+    episode_ids: list[int] | None,
+    num_workers: int | None,
+    convert_workers: int = 1,
+) -> None:
+    """Re-encode a store source into the cache, applying `transform` per episode.
+
+    The counterpart to `_convert_from_store`'s symlink path, for when a declared
+    conversion actually changes the bytes (an image resize). Mirrors `_convert`,
+    but reads from an already-open robo_dataset store and writes a VideoStore
+    when there are image keys (re-encoding those to zarr would balloon on disk).
+    `episode_ids` selects and reorders episodes physically here, so no
+    EpisodeView sidecar is written.
+    """
+    from robo_dataset.backends.video import VideoStoreWriter
+    from robo_dataset.backends.zarr_backend import ZarrStoreWriter
+    from robo_dataset.convert import convert as robo_convert
+
+    # The source may spell the action column differently (`action_key`), but the
+    # store written here is ours, so it gets rgrl's canonical "action".
+    action_key = source_cfg.get("action_key", "action")
+    target_obs_keys = list(target_shape_meta["obs"].keys())
+    key_shapes = {k: tuple(target_shape_meta["obs"][k]["shape"]) for k in target_obs_keys}
+    key_shapes["action"] = tuple(target_shape_meta["action"]["shape"])
+    key_dtypes = {
+        k: (src.frame_dtype(source_key_of[k]) if k in image_keys else np.dtype(np.float32))
+        for k in target_obs_keys
+    }
+    key_dtypes["action"] = np.dtype(np.float32)
+
+    episode_indices = list(episode_ids) if episode_ids is not None else None
+    n_episodes = len(episode_indices) if episode_indices is not None else len(src.episode_ends)
+    out.mkdir(parents=True, exist_ok=True)
+    if image_keys:
+        dst = VideoStoreWriter.create(
+            str(out),
+            key_shapes=key_shapes,
+            key_dtypes=key_dtypes,
+            n_episodes=n_episodes,
+            image_keys=image_keys,
+            fps=_store_fps(Path(source_cfg["store_path"])) or 30.0,
+            crf=int(source_cfg.get("crf", 20)),
+            kfi=1,
+        )
+    else:
+        dst = ZarrStoreWriter.create(
+            str(out), key_shapes=key_shapes, key_dtypes=key_dtypes, image_keys=image_keys
+        )
+
+    stats_accum: dict[str, list[np.ndarray]] = {k: [] for k in key_shapes if k not in image_keys}
+
+    def transform_and_collect(ep: dict) -> dict:
+        # plan_transforms' transform reads the action as "action"; the source
+        # store may expose it under another name.
+        if action_key != "action":
+            ep = {**ep, "action": ep[action_key]}
+        out_ep = transform(ep)
+        for k, acc in stats_accum.items():
+            acc.append(out_ep[k])
+        return out_ep
+
+    robo_convert(
+        src,
+        dst,
+        transform=transform_and_collect,
+        keys=[source_key_of[k] for k in target_obs_keys] + [action_key],
+        episode_indices=episode_indices,
+        workers=convert_workers,
+        verbose=True,
+    )
+    write_sidecars(
+        out,
+        stats_keys=stats_accum,
+        env_meta={
+            **source_cfg.get("env_meta", {}),
+            "abs_action": source_cfg.get("abs_action", False),
+        },
+        source=str(source_cfg["store_path"]),
+        fps=_store_fps(Path(source_cfg["store_path"])),
+        norm_method=source_cfg.get("norm_method", "minmax"),
+        num_workers=num_workers,
+    )
+
+
+def _store_fps(store_path: Path) -> float | None:
+    """fps from a robo_dataset meta.json or a LeRobot meta/info.json."""
+    for rel in ("meta.json", "meta/info.json"):
+        p = store_path / rel
+        if p.exists():
+            fps = json.loads(p.read_text()).get("fps")
+            if fps is not None:
+                return float(fps)
+    return None
+
+
 def _convert_from_store(
-    source_cfg: dict, target_shape_meta: dict, out: Path, num_workers: int | None = None
+    source_cfg: dict,
+    target_shape_meta: dict,
+    out: Path,
+    num_workers: int | None = None,
+    convert_workers: int = 1,
 ) -> None:
     """Adapt a dataset already in a robo_dataset-native format (zarr, video,
     lerobot, ...) for rgrl.
@@ -561,25 +684,34 @@ def _convert_from_store(
             "_convert_from_store can't rename keys without rewriting the store "
             f"(rename={rename}) — use the `path` (HDF5) source kind instead"
         )
-    _transform, image_keys, source_key_of = plan_transforms(source_meta, target_shape_meta, rename)
-    for k in image_keys:
-        src_co = source_meta["obs"][k].get("channel_order", "rgb")
-        tgt_co = target_shape_meta["obs"][k].get("channel_order", "rgb")
-        if src_co != tgt_co:
-            raise NotImplementedError(
-                f"_convert_from_store can't flip channel_order without rewriting the store "
-                f"({k}: {src_co} -> {tgt_co})"
-            )
+    transform, image_keys, source_key_of = plan_transforms(source_meta, target_shape_meta, rename)
+    rewrites = planned_rewrites(source_meta, target_shape_meta, rename)
 
     src = open_store(str(store_path))
     episode_ids = source_cfg.get("episode_ids")
+
+    if rewrites:
+        # Some key's bytes differ from the source's (today: an image resize), so
+        # the symlink path below can't represent it. Re-encode into the cache
+        # once instead -- the manifest hash covers the target shape_meta, so a
+        # different resolution is simply a different cache entry.
+        log.info(f"[load_store] re-encoding {rewrites} into {out}")
+        _rewrite_from_store(
+            src, source_cfg, target_shape_meta, out, transform, image_keys,
+            source_key_of, episode_ids, num_workers, convert_workers,
+        )
+        return
+
 
     out.mkdir(parents=True, exist_ok=True)
     # ZarrStore reads episode_ends.npy as a required top-level file;
     # video-backed stores keep the same information in meta.json. A logical
     # EpisodeView is applied by rgrl.store.EpisodeStore after opening these
     # physical links.
-    for entry in ("meta.json", "episode_ends.npy", "videos", "data"):
+    # "meta" (a directory) is LeRobot's metadata home — info.json lives there,
+    # and store_factory.detect_format keys on it, so the cache dir is
+    # unopenable without it.
+    for entry in ("meta.json", "meta", "episode_ends.npy", "videos", "data"):
         src_entry = store_path / entry
         if src_entry.exists():
             (out / entry).symlink_to(src_entry.resolve())
@@ -607,10 +739,10 @@ def _convert_from_store(
         for k in target_shape_meta["obs"]
         if k not in image_keys
     }
-    stats_keys["action"] = dst.get_sequence("action", 0, n).astype(np.float32)
+    action_key = source_cfg.get("action_key", "action")
+    stats_keys["action"] = dst.get_sequence(action_key, 0, n).astype(np.float32)
 
-    meta_path = store_path / "meta.json"
-    fps = json.loads(meta_path.read_text()).get("fps") if meta_path.exists() else None
+    fps = _store_fps(store_path)
 
     write_sidecars(
         out,
@@ -623,4 +755,5 @@ def _convert_from_store(
         fps=fps,
         norm_method=source_cfg.get("norm_method", "minmax"),
         num_workers=num_workers,
+        action_key=action_key,
     )

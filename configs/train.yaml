@@ -24,8 +24,24 @@ hydra:
 
 out: runs/dev
 
+# Where load_store materializes converted stores. Relative paths are resolved
+# against the invocation dir (hydra chdir is off), which puts the cache on
+# whatever filesystem you launched from -- point it at a data disk when the
+# conversion is large or the boot drive is tight.
+cache_root: data/cache
+
 # Processes used to fit normalizer stats on a cache miss (one-time conversion).
 # The single source for this knob. Deliberately top-level, not under `data`:
 # it's an orchestration knob, so it must not enter the conversion cache hash.
 # null -> one process per key, capped at the CPU count.
 stats_workers: null
+
+# Threads used to re-encode episodes on a cache miss (one-time conversion).
+# Like stats_workers this is orchestration, not data identity, so it stays
+# top-level and out of the conversion-cache hash. Decode/resize/encode all
+# release the GIL, so >1 is a large win on a re-encode (2.4M frames: ~1.5h on one
+# core vs ~10min at 12). Default stays 1 because convert() fans threads over a
+# SHARED source store, and LeRobotStore's parquet caches (_episode_cache's
+# check-then-popitem, the single-slot _v3_file_cache) are not synchronized --
+# opt in per run until those are made thread-safe.
+convert_workers: 1

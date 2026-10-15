@@ -97,8 +97,8 @@ class TimmEncoder(nn.Module):
 
     Port of UMI's TimmObsEncoder: build any timm model by name (num_classes=0 ->
     global-pooled features), optionally frozen, with the configured input norm.
-    Patch backbones (e.g. DINOv2 ViT/14) need a fixed square input, so images are
-    resized to ``img_size``. ``num_kp`` is unused (no SpatialSoftmax), accepted
+    Patch backbones (e.g. DINOv2 ViT/14) need a fixed grid, so images are resized
+    to ``img_size`` -- an int for a square, or (h, w) to keep the true aspect. ``num_kp`` is unused (no SpatialSoftmax), accepted
     only for a uniform ObsEncoder signature.
     """
 
@@ -115,10 +115,19 @@ class TimmEncoder(nn.Module):
         super().__init__()
         import timm
 
-        self.img_size = int(img_size)
+        # int -> square (the historical behaviour); (h, w) -> that exact grid.
+        # A square forces non-square frames to be stretched or squashed (168x224
+        # -> 224 stretches height +33%, -> 168 squashes width -25%); passing the
+        # true aspect keeps every pixel where it belongs. DINOv2's own pretrained
+        # grid is 518/14 = 37x37, so any of these interpolates position
+        # embeddings -- there is no privileged "pretrained" size here.
+        self.img_hw = (
+            (int(img_size), int(img_size)) if isinstance(img_size, (int, float))
+            else (int(img_size[0]), int(img_size[1]))
+        )
         try:
             model = timm.create_model(
-                model_name, pretrained=pretrained, num_classes=0, img_size=self.img_size
+                model_name, pretrained=pretrained, num_classes=0, img_size=self.img_hw
             )
         except TypeError:
             # backbones that don't accept img_size (e.g. plain resnets)
@@ -136,9 +145,9 @@ class TimmEncoder(nn.Module):
 
     def _encode(self, x: torch.Tensor) -> torch.Tensor:
         x = (x - self.img_mean) / self.img_std
-        if x.shape[-2:] != (self.img_size, self.img_size):
+        if x.shape[-2:] != self.img_hw:
             x = nn.functional.interpolate(
-                x, size=(self.img_size, self.img_size), mode="bilinear", align_corners=False
+                x, size=self.img_hw, mode="bilinear", align_corners=False
             )
         return self.model(x)
 

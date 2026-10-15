@@ -33,6 +33,73 @@ _QUAT_PERM = {("xyzw", "wxyz"): [3, 0, 1, 2], ("wxyz", "xyzw"): [1, 2, 3, 0]}
 EpisodeTransform = Callable[[dict], dict]
 
 
+def _resize_spec(src_spec: dict, tgt_spec: dict, key: str) -> tuple[int, int] | None:
+    """(h, w) an rgb key must be resized to, or None when it already matches.
+
+    Only downscaling is allowed: upscaling would invent detail the recorded
+    frames never had, and every real use (a 480x640 dataset feeding a policy
+    that sees ~168x224) goes the other way.
+    """
+    src_shape, tgt_shape = list(src_spec["shape"]), list(tgt_spec["shape"])
+    if src_shape == tgt_shape:
+        return None
+    if len(src_shape) != 3 or len(tgt_shape) != 3 or src_shape[2] != tgt_shape[2]:
+        raise ValueError(
+            f"{key}: image {src_shape} -> {tgt_shape} is not a resize (channel count "
+            "or rank differs)"
+        )
+    if tgt_shape[0] > src_shape[0] or tgt_shape[1] > src_shape[1]:
+        raise ValueError(f"{key}: refusing to upscale images {src_shape} -> {tgt_shape}")
+    return int(tgt_shape[0]), int(tgt_shape[1])
+
+
+def _resize_op(size: tuple[int, int]) -> Callable[[np.ndarray], np.ndarray]:
+    """Area-averaged resize over a (T, H, W, C) uint8 episode.
+
+    INTER_AREA matches rgrl.transforms.ResizeTransform and DroidStore's
+    build-time resize, so a frame downscaled here is the same one a live camera
+    feed lands on after the inference-time pipeline.
+    """
+    h, w = size
+
+    def op(a: np.ndarray) -> np.ndarray:
+        import cv2
+
+        out = np.empty((a.shape[0], h, w, a.shape[3]), dtype=a.dtype)
+        for i in range(a.shape[0]):
+            cv2.resize(a[i], (w, h), dst=out[i], interpolation=cv2.INTER_AREA)
+        return out
+
+    return op
+
+
+def planned_rewrites(source_meta: dict, target_meta: dict, rename: dict | None = None) -> list[str]:
+    """Target keys whose BYTES differ from the source's.
+
+    A store source can normally be adapted by symlinking the files as-is
+    (`rgrl.data._convert_from_store`); that is only valid when every key is
+    byte-identical to what the policy wants. This names the keys that aren't,
+    so the caller knows it has to re-encode into the cache instead.
+    """
+    rename = dict(rename or {})
+    target_of_source = {k: rename.get(k, k) for k in source_meta["obs"]}
+    source_of_target = {v: k for k, v in target_of_source.items()}
+    out: list[str] = []
+    for tgt_key, tgt_spec in target_meta["obs"].items():
+        src_key = source_of_target.get(tgt_key)
+        if src_key is None:
+            continue  # plan_transforms raises on this
+        src_spec = source_meta["obs"][src_key]
+        if tgt_spec.get("type", "low_dim") == "rgb":
+            if _resize_spec(src_spec, tgt_spec, tgt_key) is not None:
+                out.append(tgt_key)
+            elif src_spec.get("channel_order", "rgb") != tgt_spec.get("channel_order", "rgb"):
+                out.append(tgt_key)
+        elif src_spec.get("quat_convention") != tgt_spec.get("quat_convention"):
+            out.append(tgt_key)
+    return out
+
+
 def plan_transforms(
     source_meta: dict, target_meta: dict, rename: dict | None = None
 ) -> tuple[EpisodeTransform, list[str], dict[str, str]]:
@@ -76,12 +143,13 @@ def plan_transforms(
         src_shape, tgt_shape = list(src_spec["shape"]), list(tgt_spec["shape"])
         if tgt_type == "rgb":
             image_keys.append(tgt_key)
-            if src_shape != tgt_shape:
-                raise ValueError(
-                    f"{tgt_key}: image resize {src_shape} -> {tgt_shape} is not implemented "
-                    "(no current task needs it — augmentation-time cropping in "
-                    "rgrl/policies/base.py::ObsEncoder covers size changes today)"
-                )
+            resize_to = _resize_spec(src_spec, tgt_spec, tgt_key)
+            if resize_to is not None:
+                # Decoding native frames only to shrink them every step is the
+                # dominant cost for a large-image store (measured: ~75% of step
+                # time on 480x640 sim-bottles). Doing it once at conversion time
+                # bakes the policy's working resolution into the cache instead.
+                ops.append(_resize_op(resize_to))
             src_co = src_spec.get("channel_order", "rgb")
             tgt_co = tgt_spec.get("channel_order", "rgb")
             for co in (src_co, tgt_co):

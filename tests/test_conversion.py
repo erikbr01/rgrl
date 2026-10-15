@@ -67,11 +67,34 @@ def test_unresolvable_shape_mismatch_raises():
         plan_transforms(source, target, rename={})
 
 
-def test_image_resize_not_implemented_raises():
+def test_image_downscale_is_planned():
     source = _meta({"cam": {"shape": [8, 8, 3], "type": "rgb"}}, [7])
     target = _meta({"cam": {"shape": [4, 4, 3], "type": "rgb"}}, [7])
-    with pytest.raises(ValueError, match="resize"):
+    transform, image_keys, _ = plan_transforms(source, target, rename={})
+    assert image_keys == ["cam"]
+    frames = np.zeros((2, 8, 8, 3), dtype=np.uint8)
+    frames[:, :4] = 255  # top half white, bottom half black
+    out = transform({"cam": frames, "action": np.zeros((2, 7), np.float32)})
+    assert out["cam"].shape == (2, 4, 4, 3)
+    assert out["cam"].dtype == np.uint8
+    # area-averaged downscale keeps the top/bottom split rather than smearing it
+    assert out["cam"][0, :2].min() == 255 and out["cam"][0, 2:].max() == 0
+
+
+def test_image_upscale_raises():
+    source = _meta({"cam": {"shape": [4, 4, 3], "type": "rgb"}}, [7])
+    target = _meta({"cam": {"shape": [8, 8, 3], "type": "rgb"}}, [7])
+    with pytest.raises(ValueError, match="upscale"):
         plan_transforms(source, target, rename={})
+
+
+def test_planned_rewrites_flags_only_byte_changes():
+    from rgrl.conversion import planned_rewrites
+
+    same = _meta({"cam": {"shape": [8, 8, 3], "type": "rgb"}}, [7])
+    assert planned_rewrites(same, same, rename={}) == []
+    smaller = _meta({"cam": {"shape": [4, 4, 3], "type": "rgb"}}, [7])
+    assert planned_rewrites(same, smaller, rename={}) == ["cam"]
 
 
 def test_action_shape_mismatch_raises():

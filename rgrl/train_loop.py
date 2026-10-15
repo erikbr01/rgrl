@@ -120,6 +120,22 @@ class TrainConfig:
     # _COMPILE_MODES. This is training-only and never touches inference compile.
     compile_mode: str = "max-autotune"
     bf16: bool = True
+    # Clip global grad norm before opt.step(). None (default) keeps the
+    # historical unclipped behaviour. Worth setting under bf16: an occasional
+    # gradient spike has nothing to clamp it and NaNs the run, intermittently
+    # and silently (ABC-DiT's own recipe clips at 10.0).
+    max_grad_norm: float | None = None
+    # cuDNN conv-algorithm autotuning. True (default) keeps the historical
+    # behaviour; False trades some throughput for reproducible kernel selection.
+    cudnn_benchmark: bool = True
+    # Run-to-run bit reproducibility. Today two runs of one config + seed do NOT
+    # agree (measured: loss 0.2273 vs 0.2282 at step 200), which makes any
+    # numerical bug unfalsifiable -- you cannot tell a real regression from
+    # kernel-selection noise. Setting this pins deterministic kernels
+    # (cudnn.deterministic, use_deterministic_algorithms) on top of
+    # cudnn_benchmark=False. Slower; needs CUBLAS_WORKSPACE_CONFIG=:4096:8 in the
+    # environment, which must be set before CUDA initialises.
+    deterministic: bool = False
     ema_power: float = 0.75
     device: str = "cuda"
     wandb_project: str | None = None
@@ -404,7 +420,24 @@ def _train(
         raise RuntimeError("training.device requests CUDA, but CUDA is unavailable")
     torch.set_float32_matmul_precision("high")
     if device.type == "cuda":
-        torch.backends.cudnn.benchmark = True
+        # benchmark=True autotunes conv algorithms per PROCESS by timing, so two
+        # runs of one config can select different kernels with different numerics.
+        # On sim-bottles that surfaced as an intermittent fp32 overflow in the
+        # ResNet image encoder's backward (grads ~2.6e38 with a finite loss at
+        # lr 1.2e-5). Set cudnn_benchmark=false to pin algorithm selection.
+        torch.backends.cudnn.benchmark = cfg.cudnn_benchmark and not cfg.deterministic
+        if cfg.deterministic:
+            torch.backends.cudnn.deterministic = True
+            # warn_only: a few ops (e.g. some pooling backwards) have no
+            # deterministic kernel; erroring would make the mode unusable, and
+            # the remaining nondeterminism is far smaller than kernel selection.
+            torch.use_deterministic_algorithms(True, warn_only=True)
+            if "CUBLAS_WORKSPACE_CONFIG" not in os.environ:
+                log.warning(
+                    "deterministic=true without CUBLAS_WORKSPACE_CONFIG=:4096:8 in the "
+                    "environment -- cuBLAS reductions stay nondeterministic (it must be "
+                    "set before CUDA initialises, so it cannot be set from here)"
+                )
 
     # FP32 parameter + gradient + EMA + two Adam moments. This intentionally
     # excludes activations/Inductor workspaces; device_memory_reserve_gb owns
@@ -689,15 +722,72 @@ def _train(
         cfg.batch_size, cfg.seed, start_batch=start_step, prefetch_factor=cfg.prefetch_factor
     )
 
+    _debug_finite = os.environ.get("RGRL_DEBUG_FINITE") == "1"
+
+    def _first_bad(step: int, batch, loss, phase: str, pre_bad_w) -> None:
+        """Report the first non-finite event with enough context to localize it."""
+        lines = [f"\n=== RGRL_DEBUG_FINITE: non-finite at step {step} during {phase} ==="]
+        lines.append(f"  weights non-finite BEFORE this step: {pre_bad_w[:6]} (n={len(pre_bad_w)})")
+        for k, v in batch.items():
+            if v.dtype.is_floating_point:
+                n = int((~torch.isfinite(v)).sum())
+                lines.append(f"  batch[{k}]: dtype={v.dtype} nonfinite={n} "
+                             f"absmax={v.detach().float().abs().max().item():.4g}")
+            else:
+                lines.append(f"  batch[{k}]: dtype={v.dtype} absmax={int(v.max())}")
+        lines.append(f"  loss={loss.detach().float().item() if loss is not None else None}")
+        bad_g, gmax = [], 0.0
+        for n_, p_ in policy.named_parameters():
+            if p_.grad is None:
+                continue
+            g = p_.grad
+            if not torch.isfinite(g).all():
+                bad_g.append(n_)
+            else:
+                gmax = max(gmax, g.detach().float().abs().max().item())
+        lines.append(f"  grads non-finite in {len(bad_g)} params; first: {bad_g[:8]}")
+        lines.append(f"  max |finite grad| = {gmax:.4g}")
+        # Grad magnitude by depth: localizes where backward starts amplifying.
+        by_mod: dict[str, tuple[int, float]] = {}
+        for n_, p_ in policy.named_parameters():
+            if p_.grad is None:
+                continue
+            mod = ".".join(n_.split(".")[:4])
+            n_bad, mx = by_mod.get(mod, (0, 0.0))
+            g = p_.grad.detach().float()
+            if torch.isfinite(g).all():
+                mx = max(mx, g.abs().max().item())
+            else:
+                n_bad += 1
+            by_mod[mod] = (n_bad, mx)
+        lines.append("  grad profile by module (nonfinite_params, max|grad|):")
+        for mod, (nb, mx) in by_mod.items():
+            lines.append(f"    {mod:58s} nonfinite={nb} max={mx:.3g}")
+        print("\n".join(lines), flush=True)
+
     def one_step(step: int) -> None:
         nonlocal loss_sum, loss_count
         with prof("data"):
             batch = next(batches)
+        pre_bad_w = []
+        if _debug_finite:
+            pre_bad_w = [n for n, p in policy.named_parameters() if not torch.isfinite(p).all()]
         with prof("fwd"), autocast:
             loss = policy.loss(batch)
+        if _debug_finite and (pre_bad_w or not torch.isfinite(loss).all()):
+            _first_bad(step, batch, loss, "forward", pre_bad_w)
+            raise SystemExit(f"stopping at first non-finite (step {step})")
         with prof("bwd"):
             loss.backward()
+        if _debug_finite:
+            bad_g = [n for n, p in policy.named_parameters()
+                     if p.grad is not None and not torch.isfinite(p.grad).all()]
+            if bad_g:
+                _first_bad(step, batch, loss, "backward", pre_bad_w)
+                raise SystemExit(f"stopping at first non-finite grad (step {step})")
         with prof("opt"):
+            if cfg.max_grad_norm is not None:
+                torch.nn.utils.clip_grad_norm_(policy.parameters(), cfg.max_grad_norm)
             opt.step()
             opt.zero_grad(set_to_none=True)
             sched.step()

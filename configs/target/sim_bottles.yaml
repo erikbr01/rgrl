@@ -1,0 +1,15 @@
+# shape_meta the policy consumes. The camera is declared at 168x224 while the
+# source (data/sim_bottles.yaml) is the native 480x640, so load_store re-encodes
+# once into the conversion cache at this resolution -- 168x224 is what
+# abc_minimal's MuJoCo-Warp evaluator renders, and the resulting ~21GB store
+# fits in host RAM (training=sim_bottles_ram), so training never decodes.
+obs:
+  top_camera-images-rgb:
+    shape: [168, 224, 3]
+    type: rgb
+    channel_order: rgb
+  state:
+    shape: [14]
+    type: low_dim
+action:
+  shape: [14]

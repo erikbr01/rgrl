@@ -1,0 +1,25 @@
+# WARP-RM sim-bottles (uynitsuj/sim-bottles-mjwarp-v1), read as a LeRobot v3.0
+# store -- all 2438 episodes. `action_key` because this dataset spells the
+# action column "actions"; rgrl refers to it as "action" everywhere.
+#
+# Native frames are 480x640; target/sim_bottles.yaml declares 168x224, so
+# load_store re-encodes once into the conversion cache at the resolution the
+# MuJoCo-Warp evaluator renders at. All 2438 episodes at that size are ~252GB
+# uncompressed -- past host RAM -- so train with training=sim_bottles_full
+# (data_mode=disk), which is cheap now that the stored frames are small.
+name: sim_bottles
+store_path: /mnt/ssdB/erik/policy_graphs/data/warp_rm/sim-bottles-mjwarp-v1
+abs_action: false
+rename: {}
+action_key: actions
+shape_meta:
+  obs:
+    top_camera-images-rgb:
+      shape: [480, 640, 3]
+      type: rgb
+      channel_order: rgb
+    state:
+      shape: [14]
+      type: low_dim
+  action:
+    shape: [14]

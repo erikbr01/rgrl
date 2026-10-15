@@ -1,0 +1,23 @@
+# sim-bottles DiT flow with a DINOv2 ViT-S/14 vision backbone instead of the
+# ResNet18 + SpatialSoftmax encoder.
+#
+# Two reasons to try it here: DINOv2 features are far stronger than a
+# from-scratch-normalized ResNet on 200-2438 demos, and the non-finite gradients
+# on this task localized entirely to enc.encoders.*.backbone.* (the ResNet's
+# BatchNorm->GroupNorm path), which this replaces outright.
+#
+# frozen_backbone stays FALSE to match the
+# ResNet baseline, which trains its encoder end to end. Freezing would also
+# confound any comparison against the non-finite-gradient failure, since it
+# removes backbone gradients altogether rather than replacing the encoder.
+defaults:
+  - dit_flow_sim_bottles
+  - _self_
+
+backbone: vit_small_patch14_dinov2.lvd142m
+pretrained_backbone: true
+image_norm: imagenet
+# Aspect-preserving and both /14: the crop is 152x208, so a square 224 would
+# upsample every image and cost 256 patches instead of 165.
+vit_img_size: [154, 210]
+frozen_backbone: false

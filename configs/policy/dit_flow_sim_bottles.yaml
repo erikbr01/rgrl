@@ -1,0 +1,34 @@
+# ABC-style DiT flow for the WARP-RM sim-bottles task.
+#
+# Two settings are dictated by abc_minimal's evaluator, not by taste
+# (eval_policy.py:950-964 -- when policy_backend="pi0" it FORCES
+# execute_chunk_dim=30, num_chunks=60 and ignores the CLI):
+#
+# 1. n_action_steps=30. The evaluator slices actions[:30] and rolls them out
+#    open loop. A shorter chunk is silently accepted and just advances fewer
+#    env steps, so a 16-step chunk gives 60x16=960 steps against the 1800 that
+#    branch is calibrated to -- i.e. ~53% of the time budget the DiT baselines
+#    got, making success rates incomparable. horizon must satisfy
+#    obs_horizon - 1 + n_action_steps <= horizon.
+#
+# 2. obs_horizon=1. The openpi websocket protocol carries one observation per
+#    infer() call, i.e. one per CHUNK, so a policy trained on consecutive frames
+#    would be served frames 30 steps apart -- the exact failure rgrl's
+#    PolicyBase docstring warns about ("a window pushed only at submit time
+#    holds frames one chunk apart ... silently destroys rollout performance").
+#    With obs_horizon=1 there is no history to misalign. Raising it requires
+#    streaming per-step obs to the server first.
+defaults:
+  - dit_flow
+  - _self_
+
+obs_horizon: 1
+horizon: 32
+n_action_steps: 30
+max_action_prefix: 1
+data_transforms:
+  - _target_: rgrl.transforms.CropTransform
+    _partial_: true
+    size: [152, 208]
+    pad: 0
+    per_timestep: true

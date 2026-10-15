@@ -122,14 +122,21 @@ class EpisodeStore:
             self.episode_ids = tuple(view_doc["episode_ids"])
             self._robo = EpisodeView(self._robo, self.episode_ids)
 
+        rgrl_meta = json.loads((self.path / _RGRL_META_FILE).read_text())
+        # Stores that spell the action column something else (LeRobot datasets
+        # commonly use "actions") record the physical name here; rgrl still
+        # refers to it as "action" everywhere above this line.
+        self._action_key = rgrl_meta.get("action_key", "action")
+
         keys = {}
         for k, spec in shape_meta["obs"].items():
             keys[k] = self._checked_key_spec(k, spec)
         keys["action"] = self._checked_key_spec(
-            "action", {"shape": shape_meta["action"]["shape"], "type": KIND_ACTION}
+            "action",
+            {"shape": shape_meta["action"]["shape"], "type": KIND_ACTION},
+            physical=self._action_key,
         )
 
-        rgrl_meta = json.loads((self.path / _RGRL_META_FILE).read_text())
         self.meta = StoreMeta(
             episode_ends=self._robo.episode_ends.tolist(),
             keys=keys,
@@ -140,7 +147,18 @@ class EpisodeStore:
         stats_path = self.path / _STATS_FILE
         self.stats = json.loads(stats_path.read_text()) if stats_path.exists() else {}
 
-    def _checked_key_spec(self, key: str, spec: dict) -> "KeySpec":
+    def _phys(self, key: str) -> str:
+        """The underlying store's name for an rgrl-facing key.
+
+        A store whose action column is spelled differently (LeRobot datasets
+        commonly use "actions") records it in rgrl_meta.json; every read goes
+        through here so "action" is the only name used above this boundary.
+        """
+        return self._action_key if key == "action" else key
+
+    def _checked_key_spec(self, key: str, spec: dict, physical: str | None = None) -> "KeySpec":
+        """`physical` names the underlying store key when it differs from the
+        rgrl-facing one (see `action_key`); errors still report `key`."""
         type_ = spec.get("type", "low_dim")
         if type_ == KIND_ACTION:
             kind = KIND_ACTION
@@ -152,7 +170,7 @@ class EpisodeStore:
             raise ValueError(f"{key}: unknown shape_meta type {type_!r} (expected rgb | low_dim)")
 
         declared_shape = list(spec["shape"])
-        actual_shape = list(self._robo.frame_shape(key))
+        actual_shape = list(self._robo.frame_shape(physical or key))
         if actual_shape != declared_shape:
             raise ValueError(f"{key}: shape_meta declares {declared_shape}, store has {actual_shape}")
 
@@ -178,7 +196,7 @@ class EpisodeStore:
 
         return KeySpec(
             shape=actual_shape,
-            dtype=str(self._robo.frame_dtype(key)),
+            dtype=str(self._robo.frame_dtype(physical or key)),
             kind=kind,
             channel_order=channel_order,
             quat_convention=quat_convention,
@@ -193,6 +211,7 @@ class EpisodeStore:
         # non-video backends too — a thread pool over near-free zarr reads
         # costs nothing.
         #
+        key = self._phys(key)
         # episodes: which episode indices to load, in order, default the whole
         # store — the dataset classes use this so a train/val split loads only
         # its own episodes' frames, not a full duplicate copy of the other
@@ -224,7 +243,9 @@ class EpisodeStore:
         aggregate across episodes. For on-demand access to a single sample's
         window (e.g. DiskSequenceDataset's per-sample obs horizon) so a split
         that doesn't fit resident never needs a full in-memory copy."""
-        return np.ascontiguousarray(self._robo.get_frames(episode_idx, key, start, end))
+        return np.ascontiguousarray(
+            self._robo.get_frames(episode_idx, self._phys(key), start, end)
+        )
 
     def episode_bounds(self) -> np.ndarray:
         """(num_episodes, 2) array of [start, end) frame indices."""
@@ -283,6 +304,7 @@ def write_sidecars(
     fps: float | None = None,
     norm_method: str = "minmax",
     num_workers: int | None = None,
+    action_key: str = "action",
 ) -> None:
     """Call after the robo_dataset writer's finalize() to add rgrl's sidecars.
 
@@ -313,7 +335,15 @@ def write_sidecars(
 
     path = Path(store_path)
     (path / _RGRL_META_FILE).write_text(
-        json.dumps({"env_meta": env_meta or {}, "source": source, "fps": fps}, indent=1)
+        json.dumps(
+            {
+                "env_meta": env_meta or {},
+                "source": source,
+                "fps": fps,
+                "action_key": action_key,
+            },
+            indent=1,
+        )
     )
 
     keys = list(stats_keys)

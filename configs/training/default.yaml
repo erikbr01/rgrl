@@ -34,6 +34,9 @@ compile: true
 # is configured separately and unaffected.
 compile_mode: max-autotune
 bf16: true
+max_grad_norm: null
+cudnn_benchmark: true
+deterministic: false
 ema_power: 0.75
 device: cuda
 wandb_project: null

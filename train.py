@@ -28,7 +28,13 @@ def main(cfg: DictConfig) -> None:
     # checkpoint compatibility fingerprint; editing a selection in place
     # cannot silently resume a run against different data.
     resolved_data = resolve_source_config(cfg.data)
-    store = load_store(resolved_data, cfg.target, stats_workers=cfg.get("stats_workers"))
+    store = load_store(
+        resolved_data,
+        cfg.target,
+        cache_root=cfg.get("cache_root", "data/cache"),
+        stats_workers=cfg.get("stats_workers"),
+        convert_workers=cfg.get("convert_workers", 1),
+    )
     policy = instantiate(cfg.policy, store=store, _convert_="partial")
     training = instantiate(cfg.training, out=cfg.out)
     legacy_weights_path = cfg.data.get("sample_weights_path")
