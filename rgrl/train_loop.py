@@ -32,6 +32,7 @@ from omegaconf import OmegaConf
 from torch import nn
 
 from rgrl.dataset import VAL_SELECTIONS, Windows, build_dataset
+from rgrl.diagnostics import TrainDiagnostics
 from rgrl.ema import EMA
 from rgrl.logutil import log_to_file
 from rgrl.profiler import SectionProfiler, chrome_trace
@@ -41,6 +42,7 @@ log = logging.getLogger(__name__)
 
 CHECKPOINT_SCHEMA_VERSION = 1
 _RESUME_MODES = {"never", "auto", "required", "extend"}
+_LR_SCHEDULES = {"cosine", "constant"}
 # torch.compile modes we expose. All produce the same optimizer update
 # mathematically -- they only trade compile time for kernel selection / graph
 # replay -- so compile_mode is a pure execution knob (excluded from the resume
@@ -65,6 +67,13 @@ class TrainConfig:
     weight_decay: float = 1e-6
     betas: tuple[float, float] = (0.95, 0.999)
     warmup_steps: int = 500
+    # Post-warmup LR shape. "cosine" (default) decays to 0 over the remaining
+    # steps; "constant" holds lr, which is what ABC's reference recipe does
+    # (abc_minimal/config.py:OptimConfig, "linear-warmup-then-constant"). The
+    # distinction matters when reading a late-run loss: under cosine, a run can
+    # look like it stabilized when the LR simply went to zero, which is how
+    # base3cam_500k "recovered" from R^2 -27 to -4.4 over its last 80k steps.
+    lr_schedule: str = "cosine"
     seed: int = 0
     # Seeds validation determinism: the val-loss RNG, and (with
     # val_selection=random) which episodes are held out.
@@ -125,13 +134,29 @@ class TrainConfig:
     # gradient spike has nothing to clamp it and NaNs the run, intermittently
     # and silently (ABC-DiT's own recipe clips at 10.0).
     max_grad_norm: float | None = None
+    # Optimization diagnostics -> <out>/diagnostics.jsonl (see rgrl.diagnostics).
+    # On by default: the per-step part is a few small reductions, and without it a
+    # run that destabilizes has to be repeated from scratch to learn anything
+    # about why. Set False to restore the historical log-only behaviour.
+    grad_diag: bool = True
+    # Cadence for the expensive part (per-module grad/update/trust ratios).
+    # 0 disables it, leaving only the per-step global norms. None follows
+    # log_every, which keeps diagnostics aligned with the loss line.
+    diag_every: int | None = None
+    # Record a detailed snapshot when the grad norm exceeds this multiple of its
+    # running EMA, regardless of diag_every -- divergence onsets are single steps
+    # and a fixed cadence walks straight past them.
+    diag_spike_factor: float = 4.0
     # cuDNN conv-algorithm autotuning. True (default) keeps the historical
     # behaviour; False trades some throughput for reproducible kernel selection.
     cudnn_benchmark: bool = True
-    # Run-to-run bit reproducibility. Today two runs of one config + seed do NOT
-    # agree (measured: loss 0.2273 vs 0.2282 at step 200), which makes any
-    # numerical bug unfalsifiable -- you cannot tell a real regression from
-    # kernel-selection noise. Setting this pins deterministic kernels
+    # Run-to-run bit reproducibility. Two runs of one config + seed do NOT agree
+    # (measured: loss 0.2273 vs 0.2282 at step 200), which makes any numerical bug
+    # unfalsifiable -- you cannot tell a real regression from kernel-selection
+    # noise. cudnn_benchmark=False removes most of it but NOT all: over a 47k-step
+    # window it held bit-for-bit only ~600 steps before drifting, and the drift
+    # decided whether a run destabilized (loss 0.153) or stayed healthy (0.026).
+    # Setting this pins deterministic kernels
     # (cudnn.deterministic, use_deterministic_algorithms) on top of
     # cudnn_benchmark=False. Slower; needs CUBLAS_WORKSPACE_CONFIG=:4096:8 in the
     # environment, which must be set before CUDA initialises.
@@ -175,6 +200,10 @@ def resolve_recipe(cfg: TrainConfig) -> ResolvedRecipe:
     warmup_steps = max(0, cfg.warmup_steps)
     if warmup_steps > steps:
         raise ValueError(f"warmup_steps={warmup_steps} is beyond total steps={steps}")
+    if cfg.lr_schedule not in _LR_SCHEDULES:
+        raise ValueError(
+            f"lr_schedule must be one of {sorted(_LR_SCHEDULES)}, got {cfg.lr_schedule!r}"
+        )
     if cfg.resume not in _RESUME_MODES:
         raise ValueError(f"resume must be one of {sorted(_RESUME_MODES)}, got {cfg.resume!r}")
     if cfg.trace_steps < 0:
@@ -269,6 +298,12 @@ def _resume_spec(
         "prefetch_factor",
         "max_decoders",
         "device_memory_reserve_gb",
+        # Diagnostics only observe. With clipping off, the norm is measured via an
+        # infinite threshold, which leaves gradients untouched -- so toggling
+        # these must not invalidate a resume fingerprint.
+        "grad_diag",
+        "diag_every",
+        "diag_spike_factor",
     }:
         training.pop(key, None)
     return {
@@ -649,6 +684,8 @@ def _train(
     def lr_lambda(step: int) -> float:
         if step < recipe.warmup_steps:
             return step / max(1, recipe.warmup_steps)
+        if cfg.lr_schedule == "constant":
+            return 1.0
         progress = (step - recipe.warmup_steps) / max(1, recipe.steps - recipe.warmup_steps)
         return 0.5 * (1 + math.cos(math.pi * min(progress, 1.0)))
 
@@ -724,6 +761,16 @@ def _train(
 
     _debug_finite = os.environ.get("RGRL_DEBUG_FINITE") == "1"
 
+    diag = TrainDiagnostics(
+        out,
+        policy.named_parameters(),
+        opt,
+        diag_every=recipe.log_every if cfg.diag_every is None else cfg.diag_every,
+        spike_factor=cfg.diag_spike_factor,
+        max_grad_norm=cfg.max_grad_norm,
+        enabled=cfg.grad_diag,
+    )
+
     def _first_bad(step: int, batch, loss, phase: str, pre_bad_w) -> None:
         """Report the first non-finite event with enough context to localize it."""
         lines = [f"\n=== RGRL_DEBUG_FINITE: non-finite at step {step} during {phase} ==="]
@@ -767,6 +814,7 @@ def _train(
 
     def one_step(step: int) -> None:
         nonlocal loss_sum, loss_count
+        diag.before_step(step)
         with prof("data"):
             batch = next(batches)
         pre_bad_w = []
@@ -786,8 +834,15 @@ def _train(
                 _first_bad(step, batch, loss, "backward", pre_bad_w)
                 raise SystemExit(f"stopping at first non-finite grad (step {step})")
         with prof("opt"):
+            total_norm = None
             if cfg.max_grad_norm is not None:
-                torch.nn.utils.clip_grad_norm_(policy.parameters(), cfg.max_grad_norm)
+                # Returned norm is PRE-clip, i.e. exactly the diagnostic we want,
+                # for free.
+                total_norm = torch.nn.utils.clip_grad_norm_(
+                    policy.parameters(), cfg.max_grad_norm
+                )
+            if cfg.grad_diag:
+                diag.record_grad_norm(step, total_norm)
             opt.step()
             opt.zero_grad(set_to_none=True)
             sched.step()
@@ -869,17 +924,37 @@ def _train(
             breakdown, timings = prof.report_and_reset()
             samples_seen = step * cfg.batch_size
             epoch = samples_seen / data.num_samples
+            drec = diag.flush(step, avg, sched.get_last_lr()[0])
+            if drec:
+                extra = (
+                    f" gnorm {drec['grad_norm_mean']:.3g}/max {drec['grad_norm_max']:.3g}"
+                    f" clip {drec['clip_frac']:.2f}"
+                )
+                if drec["n_nonfinite_grad"]:
+                    extra += f" NONFINITE {drec['n_nonfinite_grad']}"
+                if drec["n_spikes"]:
+                    extra += f" spikes {drec['n_spikes']}"
+                if (d := drec.get("detail")) and d.get("update_ratio") is not None:
+                    extra += f" upd/param {d['update_ratio']:.2e}"
+            else:
+                extra = ""
             log.info(
                 f"step {step:>7}/{recipe.steps} samples {samples_seen:>10} "
                 f"epoch {epoch:6.2f} loss {avg:.4f} "
                 f"lr {sched.get_last_lr()[0]:.2e} "
                 f"{iterations_per_second:6.1f} it/s {samples_per_second / 1000:6.1f}k samples/s "
                 f"eta {eta_min:5.1f}m"
+                + extra
                 + (f"  [{breakdown}]" if breakdown else "")
             )
             if run:
                 run.log(
                     {
+                        **{
+                            f"diag/{k}": v
+                            for k, v in (drec or {}).items()
+                            if isinstance(v, (int, float))
+                        },
                         "train_loss": avg,
                         "lr": sched.get_last_lr()[0],
                         "it_per_s": iterations_per_second,

@@ -39,6 +39,9 @@ class DiTFlowConfig:
     depth: int = 8
     num_heads: int = 8
     mlp_ratio: float = 4.0
+    # RMSNorm on q/k inside DiT self-attention. False matches ABC's reference DiT,
+    # which is stable without it; see rgrl/nets/dit.py:DiTAttention.
+    qk_norm: bool = False
     num_kp: int = 32
     share_image_encoder: bool = False
     # Vision backbone. "resnet18" = torchvision ResNet18 + SpatialSoftmax; any
@@ -94,7 +97,13 @@ class DiTFlowPolicy(nn.Module):
             nn.LayerNorm(cfg.hidden_size),
         )
         self.net = ActionDiT(
-            self.act_dim, cfg.horizon, cfg.hidden_size, cfg.depth, cfg.num_heads, cfg.mlp_ratio
+            self.act_dim,
+            cfg.horizon,
+            cfg.hidden_size,
+            cfg.depth,
+            cfg.num_heads,
+            cfg.mlp_ratio,
+            qk_norm=cfg.qk_norm,
         )
 
     def _cond(self, obs_vec: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
